@@ -7,9 +7,10 @@ const app = express();
 app.use(bodyParser.json());
 
 // MongoDB connection
-//metro.proxy.rlwy.net:38992
-//localhost:27017/userdb
-mongoose.connect('mongodb://metro.proxy.rlwy.net:38992', {
+//metro.proxy.rlwy.net:38992/userdb
+//mongodb://mongo:tWnrBkLKRCdsWvKqLPgbXOXlyoCADRVE@metro.proxy.rlwy.net:38992
+//mongodb://localhost:27017/userdb
+mongoose.connect('mongodb://mongo:tWnrBkLKRCdsWvKqLPgbXOXlyoCADRVE@metro.proxy.rlwy.net:38992', {
   useNewUrlParser: true,
   useUnifiedTopology: true
 }).then(() => console.log('MongoDB connected'))
@@ -22,3 +23,4 @@ app.use('/api/auth', authRoutes);
 app.listen(3000, () => {
   console.log('Server running on port 3000');
 });
+//password:-noJGlrsa0DlIOgPR
