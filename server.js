@@ -7,7 +7,9 @@ const app = express();
 app.use(bodyParser.json());
 
 // MongoDB connection
-mongoose.connect('mongodb://localhost:27017/userdb', {
+//metro.proxy.rlwy.net:38992
+//localhost:27017/userdb
+mongoose.connect('mongodb://metro.proxy.rlwy.net:38992', {
   useNewUrlParser: true,
   useUnifiedTopology: true
 }).then(() => console.log('MongoDB connected'))
