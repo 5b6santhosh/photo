@@ -37,6 +37,15 @@ app.use('/api/auth', authRoutes);
 
 app.use('/api/uploads', uploadRoutes);
 
+// Serve static HTML files from "public" folder
+app.use(express.static(path.join(__dirname, 'public')));
+
+
+// Default route (optional)
+app.get('/', (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
 // Start server
 app.listen(3000, () => {
   console.log('Server running on port 3000');

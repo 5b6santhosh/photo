@@ -33,6 +33,8 @@ router.post('/', upload.single('file'), async (req, res) => {
   try {
     console.log('FILE:', req.file);
     console.log('BODY:', req.body);
+    console.log('Full:', req);
+
 
     if (!req.file) return res.status(400).json({ message: 'No file uploaded' });
 
