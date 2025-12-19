@@ -1,7 +1,6 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const User = require('../models/User');
-const { v4: uuidv4 } = require('uuid');
 const router = express.Router();
 
 // Register route
@@ -40,6 +39,7 @@ router.post('/login', async (req, res) => {
     if (!isMatch) return res.status(400).json({ message: 'Invalid email or password' });
 
     // Generate API key
+    const { v4: uuidv4 } = await import('uuid');
     const apiKey = uuidv4();
 
     //const users = await User.find({ apikey: { $exists: false } });
