@@ -43,36 +43,50 @@ const upload = multer({
  */
 
 
-router.post('/', upload.single('file'), async (req, res) => {
-  try {
-    console.log('FILE:', req.file);
-    console.log('BODY:', req.body);
-    console.log('Full:', req);
+router.post('/', (req, res) => {
+  upload.single('file')(req, res, async (err) => {
 
+    // ❌ Multer / fileFilter error
+    if (err) {
+      return res.status(400).json({
+        message: err.message || 'Invalid file upload'
+      });
+    }
 
-    if (!req.file) return res.status(400).json({ message: 'No file uploaded' });
+    try {
+      if (!req.file) {
+        return res.status(400).json({ message: 'No file uploaded' });
+      }
 
-    const createdBy = req.headers['x-user-id'] || 'anonymous';
-    const meta = new FileMeta({
-      fileName: req.file.filename,
-      originalName: req.file.originalname,
-      mimeType: req.file.mimetype,
-      size: req.file.size,
-      path: path.join(UPLOAD_DIR, req.file.filename),
-      description: req.body.description,
-      createdBy
-    });
+      const createdBy = req.headers['x-user-id'] || 'anonymous';
 
-    await meta.save();
-    return res.status(201).json({ message: 'File uploaded', file: meta });
-  } catch (err) {
-    console.error('Upload error:', err);
-    return res.status(500).json({
-      message: 'Upload failed',
-      error: err && err.message ? err.message : 'Internal Server Error'
-    });
-  }
+      const meta = new FileMeta({
+        fileName: req.file.filename,
+        originalName: req.file.originalname,
+        mimeType: req.file.mimetype,
+        size: req.file.size,
+        path: path.join(UPLOAD_DIR, req.file.filename),
+        description: req.body.description,
+        createdBy
+      });
+
+      await meta.save();
+
+      return res.status(201).json({
+        message: 'File uploaded',
+        file: meta
+      });
+
+    } catch (e) {
+      console.error('Upload error:', e);
+      return res.status(500).json({
+        message: 'Upload failed',
+        error: e.message
+      });
+    }
+  });
 });
+
 
 
 // --- List (with optional paging) ---
