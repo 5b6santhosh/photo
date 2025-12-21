@@ -35,7 +35,7 @@ async function uploadFile() {
     formData.append("description", description);
 
     try {
-        const response = await fetch("https://photo-production-662b.up.railway.app/file.html/api/uploads", {
+        const response = await fetch("https://photo-production-662b.up.railway.app/api/uploads", {
             method: "POST",
             headers: {
                 "x-user-id": "user456" // custom header
