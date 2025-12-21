@@ -16,13 +16,20 @@ app.use(express.json());
 // serve static uploads (optional)
 app.use('/uploads', express.static(path.join(__dirname, process.env.UPLOAD_DIR || 'uploads')))
 
+app.use((err, req, res, next) => {
+  if (err.message === 'Only PNG and JPG images are allowed') {
+    return res.status(400).json({ message: err.message });
+  }
+  next(err);
+});
 
 app.use(bodyParser.json());
 
 // MongoDB connection
 //metro.proxy.rlwy.net:38992/userdb
 //mongodb://mongo:tWnrBkLKRCdsWvKqLPgbXOXlyoCADRVE@metro.proxy.rlwy.net:38992
-const live="mongodb://mongo:tWnrBkLKRCdsWvKqLPgbXOXlyoCADRVE@metro.proxy.rlwy.net:38992";
+//const live="mongodb://mongo:tWnrBkLKRCdsWvKqLPgbXOXlyoCADRVE@metro.proxy.rlwy.net:38992";
+const live="mongodb://mongo:QKXvldGkjDJFtoukixXxauKuFJFDWclx@trolley.proxy.rlwy.net:54492";
 //const live="mongodb://localhost:27017/userdb";
 
 mongoose.connect(live, {
