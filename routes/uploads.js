@@ -18,9 +18,21 @@ const storage = multer.diskStorage({
   }
 });
 
+const fileFilter = (req, file, cb) => {
+  const allowedMimeTypes = ['image/png', 'image/jpeg', 'image/jpg'];
+
+  if (allowedMimeTypes.includes(file.mimetype)) {
+    cb(null, true);
+  } else {
+    cb(new Error('Only PNG and JPG images are allowed'), false);
+  }
+};
+
+
 const upload = multer({
   storage,
   limits: { fileSize: parseInt(process.env.MAX_FILE_SIZE || '52428800', 10) }, // default 50MB
+  fileFilter
 });
 
 // --- Create (upload) ---
@@ -29,6 +41,8 @@ const upload = multer({
  * form-data: file (single), description (optional)
  * for demo: createdBy taken from header 'x-user-id' OR req.user.id if using auth middleware
  */
+
+
 router.post('/', upload.single('file'), async (req, res) => {
   try {
     console.log('FILE:', req.file);
