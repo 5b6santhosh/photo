@@ -1,6 +1,6 @@
 # photo
 
-*npm run dev  --> for automatic run your project
+* npm run dev  --> for automatic run your project
 
 *npm i bootstrap      ---> this is for dependency
 

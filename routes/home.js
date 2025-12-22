@@ -1,89 +1,160 @@
 // const express = require('express');
 // const router = express.Router();
-
 // const FileMeta = require('../models/FileMeta');
 // const Contest = require('../models/Contest');
 // const Like = require('../models/Like');
 // const User = require('../models/User');
+// const auth = require('../middleware/auth');
 
-// const auth = require('../middleware/auth'); // JWT middleware
+// // Helper function to format time labels
+// function formatTimeLabel(startDate, endDate) {
+//     const now = new Date();
+//     if (now < startDate) {
+//         const diffDays = Math.ceil((startDate - now) / (1000 * 60 * 60 * 24));
+//         return diffDays === 1 ? 'Starts tomorrow' : `Starts in ${diffDays} days`;
+//     } else if (now < endDate) {
+//         const diffDays = Math.ceil((endDate - now) / (1000 * 60 * 60 * 24));
+//         return diffDays === 0 ? 'Ends today' : diffDays === 1 ? 'Ends tomorrow' : `Ends in ${diffDays} days`;
+//     } else {
+//         const diffDays = Math.floor((now - endDate) / (1000 * 60 * 60 * 24));
+//         return diffDays === 0 ? 'Ended today' : diffDays === 1 ? 'Ended 1 day ago' : `Ended ${diffDays} days ago`;
+//     }
+// }
 
-// /**
-//  * GET /api/home
-//  * Main Home Screen API
-//  */
+// // Helper function to map contest data
+// function mapContest(contest, userId, photoMap) {
+//     const now = new Date();
+//     const startDate = new Date(contest.startDate);
+//     const endDate = new Date(contest.endDate);
+
+//     let status;
+//     if (now < startDate) status = 'upcoming';
+//     else if (now < endDate) status = 'active';
+//     else status = 'completed';
+
+//     const isActive = status === 'active';
+//     const isUpcoming = status === 'upcoming';
+//     const isCompleted = status === 'completed';
+
+//     // Handle submissions (populate if needed)
+//     const submissions = Array.isArray(contest.submissions) ? contest.submissions : [];
+//     const mySubmissions = submissions.filter(s => s.userId?.toString() === userId).length;
+
+//     // Map highlight photos
+//     const highlightPhotos = (contest.highlightPhotos || []).map(id => {
+//         const p = photoMap[id.toString()];
+//         return {
+//             id: id.toString(),
+//             title: p?.title || 'Untitled',
+//             location: p?.location || '',
+//             date: p?.uploadedAt ? new Date(p.uploadedAt) : endDate,
+//             peopleCount: p?.peopleCount || 0,
+//             category: p?.category || 'other',
+//             isFavorite: false
+//         };
+//     });
+
+//     return {
+//         id: contest._id.toString(),
+//         title: contest.title,
+//         subtitle: contest.subtitle || '',
+//         status,
+//         isActive,
+//         isUpcoming,
+//         isCompleted,
+//         prizeText: contest.prizeText || 'No prize',
+//         startDate: startDate.toISOString(),
+//         endDate: endDate.toISOString(),
+//         timeLabel: formatTimeLabel(startDate, endDate),
+//         totalSubmissions: submissions.length,
+//         mySubmissions,
+//         highlightPhotos
+//     };
+// }
+
 // router.get('/',
-//     auth,
+//     // auth, 
 //     async (req, res) => {
 //         try {
 //             // const userId = req.user.id;
-//             const userId = req.user?.id || '657890abcdef123456789012'; // temporary fallback
+//             const userId = req.user?.id || null;
 
-//             /* ---------------- HERO EVENT ---------------- */
-//             const heroEvent = await Contest.findOne({ isActive: true })
-//                 .sort({ createdAt: -1 })
+
+//             // 1. Get user wins
+//             const user = await User.findById(userId).select('wins').lean();
+//             const userWins = user?.wins || 0;
+
+//             // 2. Fetch all contests (populate submissions if needed)
+//             const contests = await Contest.find()
+//                 .populate('submissions.userId', 'name') // Optional: populate user names
+//                 .sort({ startDate: 1 })
 //                 .lean();
 
-//             /* ---------------- TOP CURATORS ---------------- */
+//             // 3. Pre-fetch all highlight photos if stored as IDs
+//             const allHighlightIds = contests.flatMap(c =>
+//                 (c.highlightPhotos || []).filter(id => id)
+//             );
+//             const uniqueHighlightIds = [...new Set(allHighlightIds.map(id => id.toString()))];
+
+//             const photoMap = {};
+//             if (uniqueHighlightIds.length > 0) {
+//                 const photos = await FileMeta.find({
+//                     _id: { $in: uniqueHighlightIds }
+//                 }).lean();
+//                 photos.forEach(p => {
+//                     photoMap[p._id.toString()] = p;
+//                 });
+//             }
+
+//             // 4. Map all events
+//             const events = contests.map(c => mapContest(c, userId, photoMap));
+
+//             // 5. Determine hero event (first active, else first upcoming, else first)
+//             let heroEvent = events.find(e => e.isActive) ||
+//                 events.find(e => e.isUpcoming) ||
+//                 events[0] || null;
+
+//             // 6. Top curators (Silver+ wins >= 3)
 //             const topCurators = await User.find({ wins: { $gte: 3 } })
 //                 .sort({ wins: -1 })
-//                 .limit(10)
+//                 .limit(12)
 //                 .select('name avatarUrl wins')
 //                 .lean();
 
-//             /* ---------------- TRENDING PHOTOS ---------------- */
-//             const photos = await FileMeta.find({ archived: false })
-//                 .sort({ uploadedAt: -1 })
+//             // 7. Trending photos (Reels feed)
+//             const photos = await FileMeta.find({
+//                 archived: false,
+//                 visibility: 'public'
+//             })
+//                 .sort({ likesCount: -1, uploadedAt: -1 })
 //                 .limit(20)
 //                 .lean();
 
-//             const trendingPhotos = await Promise.all(
-//                 photos.map(async (p) => {
-//                     const likes = await Like.countDocuments({ fileId: p._id });
-//                     const isLiked = await Like.exists({
-//                         fileId: p._id,
-//                         userId,
-//                     });
-
-//                     return {
-//                         id: p._id,
-//                         imageUrl: `${process.env.BASE_URL}/uploads/${p.fileName}`,
-//                         userName: p.createdByName,
-//                         isCurated: p.isCurated,
-//                         likes,
-//                         isLiked: !!isLiked,
-//                     };
-//                 })
-//             );
-
-//             /* ---------------- ACTIVE CONTESTS ---------------- */
-//             const contests = await Contest.find({})
-//                 .sort({ endDate: 1 })
-//                 .lean();
-
-//             const activeContests = contests.map((c) => ({
-//                 id: c._id,
-//                 title: c.title,
-//                 subtitle: c.subtitle,
-//                 status: c.status, // active | upcoming | completed
-//                 prizeText: c.prizeText,
-//                 startDate: c.startDate,
-//                 endDate: c.endDate,
-//                 totalSubmissions: c.totalSubmissions,
-//                 mySubmissions: c.submissions.filter(
-//                     (s) => s.userId.toString() === userId
-//                 ).length,
-//                 highlightPhotos: c.highlightPhotos || [],
+//             const trendingPhotos = await Promise.all(photos.map(async (p) => {
+//                 const isLiked = await Like.exists({
+//                     fileId: p._id,
+//                     userId
+//                 });
+//                 return {
+//                     id: p._id.toString(),
+//                     imageUrl: `${process.env.BASE_URL}/uploads/${p.fileName}`,
+//                     userName: p.createdByName || 'Curator',
+//                     isCurated: p.isCurated || false,
+//                     likes: p.likesCount || 0,
+//                     isLiked: !!isLiked
+//                 };
 //             }));
 
 //             res.json({
+//                 userWins,
 //                 heroEvent,
 //                 topCurators,
-//                 trendingPhotos,
-//                 activeContests,
+//                 events,
+//                 trendingPhotos
 //             });
+
 //         } catch (err) {
-//             console.error(err);
+//             console.error('HOME API ERROR:', err);
 //             res.status(500).json({ message: 'Home feed failed' });
 //         }
 //     });
@@ -91,97 +162,162 @@
 // module.exports = router;
 
 
+
 const express = require('express');
 const router = express.Router();
-
-const FileMeta = require('../models/FileMeta');
-const Contest = require('../models/Contest');
-const Like = require('../models/Like');
 const User = require('../models/User');
 
-const auth = require('../middleware/auth');
+// Helper function to format time labels
+function formatTimeLabel(startDate, endDate) {
+    const now = new Date();
+    if (now < startDate) {
+        const diffDays = Math.ceil((startDate - now) / (1000 * 60 * 60 * 24));
+        return diffDays === 1 ? 'Starts tomorrow' : `Starts in ${diffDays} days`;
+    } else if (now < endDate) {
+        const diffDays = Math.ceil((endDate - now) / (1000 * 60 * 60 * 24));
+        return diffDays === 0 ? 'Ends today' : diffDays === 1 ? 'Ends tomorrow' : `Ends in ${diffDays} days`;
+    } else {
+        const diffDays = Math.floor((now - endDate) / (1000 * 60 * 60 * 24));
+        return diffDays === 0 ? 'Ended today' : diffDays === 1 ? 'Ended 1 day ago' : `Ended ${diffDays} days ago`;
+    }
+}
 
-/**
- * GET /api/home
- * Full Home Feed API (Flutter HomeScreen)
- */
-router.get('/', auth, async (req, res) => {
+// Helper function to map contest data
+function mapContest(contest, userId, photoMap) {
+    const now = new Date();
+    const startDate = new Date(contest.startDate);
+    const endDate = new Date(contest.endDate);
+
+    let status;
+    if (now < startDate) status = 'upcoming';
+    else if (now < endDate) status = 'active';
+    else status = 'completed';
+
+    const isActive = status === 'active';
+    const isUpcoming = status === 'upcoming';
+    const isCompleted = status === 'completed';
+
+    // Handle submissions
+    const submissions = Array.isArray(contest.submissions) ? contest.submissions : [];
+    const mySubmissions = userId ? submissions.filter(s => s.userId?.toString() === userId).length : 0;
+
+    // Map highlight photos
+    const highlightPhotos = (contest.highlightPhotos || []).map(id => {
+        const p = photoMap[id.toString()];
+        return {
+            id: id.toString(),
+            title: p?.title || 'Untitled',
+            location: p?.location || '',
+            date: p?.uploadedAt ? new Date(p.uploadedAt) : endDate,
+            peopleCount: p?.peopleCount || 0,
+            category: p?.category || 'other',
+            isFavorite: false
+        };
+    });
+
+    return {
+        id: contest._id.toString(),
+        title: contest.title,
+        subtitle: contest.subtitle || '',
+        status,
+        isActive,
+        isUpcoming,
+        isCompleted,
+        prizeText: contest.prizeText || 'No prize',
+        startDate: startDate.toISOString(),
+        endDate: endDate.toISOString(),
+        timeLabel: formatTimeLabel(startDate, endDate),
+        totalSubmissions: submissions.length,
+        mySubmissions,
+        highlightPhotos
+    };
+}
+
+// Public home feed — works with or without auth
+router.get('/', async (req, res) => {
     try {
-        const userId = req.user.id;
+        // Safely get userId if authenticated
+        const userId = req.user?.id || null;
 
-        /* =====================================================
-           1️⃣ HERO FEATURED EVENT (Active → Upcoming fallback)
-        ====================================================== */
-        let heroEvent = await Contest.findOne({ status: 'active' })
+        // 1. Get user wins (if logged in)
+        let userWins = 0;
+        if (userId) {
+            const user = await User.findById(userId).select('wins').lean();
+            userWins = user?.wins || 0;
+        }
+
+        // 2. Fetch all contests
+        const contests = await Contest.find()
+            .populate('submissions.userId', 'name')
             .sort({ startDate: 1 })
             .lean();
 
-        if (!heroEvent) {
-            heroEvent = await Contest.findOne({ status: 'upcoming' })
-                .sort({ startDate: 1 })
-                .lean();
+        // 3. Pre-fetch highlight photos
+        const allHighlightIds = contests.flatMap(c =>
+            (c.highlightPhotos || []).filter(id => id)
+        );
+        const uniqueHighlightIds = [...new Set(allHighlightIds.map(id => id.toString()))];
+
+        const photoMap = {};
+        if (uniqueHighlightIds.length > 0) {
+            const photos = await FileMeta.find({
+                _id: { $in: uniqueHighlightIds }
+            }).lean();
+            photos.forEach(p => {
+                photoMap[p._id.toString()] = p;
+            });
         }
 
-        const heroEventPayload = heroEvent
-            ? mapContest(heroEvent, userId, true)
-            : null;
+        // 4. Map all events
+        const events = contests.map(c => mapContest(c, userId, photoMap));
 
-        /* =====================================================
-           2️⃣ MEET THE MASTERS (Silver+ Curators)
-        ====================================================== */
+        // 5. Determine hero event
+        let heroEvent = events.find(e => e.isActive) ||
+            events.find(e => e.isUpcoming) ||
+            events[0] || null;
+
+        // 6. Top curators
         const topCurators = await User.find({ wins: { $gte: 3 } })
             .sort({ wins: -1 })
             .limit(12)
             .select('name avatarUrl wins')
             .lean();
 
-        /* =====================================================
-           3️⃣ TRENDING PHOTOS (Reels feed)
-        ====================================================== */
+        // 7. Trending photos
         const photos = await FileMeta.find({
             archived: false,
-            visibility: 'public',
+            visibility: 'public'
         })
             .sort({ likesCount: -1, uploadedAt: -1 })
             .limit(20)
             .lean();
 
-        const trendingPhotos = await Promise.all(
-            photos.map(async (p) => {
-                const isLiked = await Like.exists({
+        const trendingPhotos = await Promise.all(photos.map(async (p) => {
+            let isLiked = false;
+            if (userId) {
+                isLiked = !!(await Like.exists({
                     fileId: p._id,
-                    userId,
-                });
+                    userId
+                }));
+            }
+            return {
+                id: p._id.toString(),
+                imageUrl: `${process.env.BASE_URL}/uploads/${p.fileName}`,
+                userName: p.createdByName || 'Curator',
+                isCurated: p.isCurated || false,
+                likes: p.likesCount || 0,
+                isLiked
+            };
+        }));
 
-                return {
-                    id: p._id,
-                    imageUrl: `${process.env.BASE_URL}/uploads/${p.fileName}`,
-                    userName: p.createdByName || 'Curator',
-                    isCurated: p.isCurated === true,
-                    likes: p.likesCount || 0,
-                    isLiked: !!isLiked,
-                };
-            })
-        );
-
-        /* =====================================================
-           4️⃣ EVENTS LIST (All states)
-        ====================================================== */
-        const contests = await Contest.find({})
-            .sort({ startDate: 1 })
-            .lean();
-
-        const events = contests.map((c) => mapContest(c, userId));
-
-        /* =====================================================
-           5️⃣ RESPONSE (STRICT CONTRACT)
-        ====================================================== */
         res.json({
-            heroEvent: heroEventPayload,
+            userWins,
+            heroEvent,
             topCurators,
-            trendingPhotos,
             events,
+            trendingPhotos
         });
+
     } catch (err) {
         console.error('HOME API ERROR:', err);
         res.status(500).json({ message: 'Home feed failed' });
@@ -189,39 +325,3 @@ router.get('/', auth, async (req, res) => {
 });
 
 module.exports = router;
-
-/* =====================================================
-   Helpers
-===================================================== */
-
-function mapContest(contest, userId, isHero = false) {
-    const now = new Date();
-
-    let status = contest.status;
-    if (!status) {
-        if (contest.startDate > now) status = 'upcoming';
-        else if (contest.endDate < now) status = 'completed';
-        else status = 'active';
-    }
-
-    const submissions = contest.submissions || [];
-    const mySubmissions = submissions.filter(
-        (s) => s.userId?.toString() === userId
-    ).length;
-
-    return {
-        id: contest._id,
-        title: contest.title,
-        subtitle: contest.subtitle,
-        status, // active | upcoming | completed
-        prizeText: contest.prizeText,
-        startDate: contest.startDate,
-        endDate: contest.endDate,
-        totalSubmissions: submissions.length,
-        mySubmissions,
-        highlightPhotos: contest.highlightPhotos || [],
-        isHero,
-    };
-}
-
-
