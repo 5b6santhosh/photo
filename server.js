@@ -72,7 +72,8 @@ app.use((req, res) => {
 });
 
 // Database Connection
-const dbURI = process.env.MONGO_URI;
+const dbURI = "mongodb+srv://photoCurator:24101997@photocurator.7wecrld.mongodb.net/?appName=PhotoCurator";
+//process.env.MONGO_URI;
 mongoose.connect(dbURI)
   .then(() => console.log('MongoDB connected'))
   .catch(err => console.error('DB connection error:', err));
