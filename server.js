@@ -79,7 +79,9 @@ mongoose.connect(dbURI)
   .catch(err => console.error('DB connection error:', err));
 
 // Use Railway's dynamic port
-const PORT = process.env.PORT || 3000;
+const PORT =
+//  process.env.PORT || 
+ 3000;
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Server running on port ${PORT}`);
 });
