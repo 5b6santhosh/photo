@@ -166,6 +166,9 @@
 const express = require('express');
 const router = express.Router();
 const User = require('../models/User');
+const FileMeta = require('../models/FileMeta');
+const Contest = require('../models/Contest');
+const Like = require('../models/Like');
 
 // Helper function to format time labels
 function formatTimeLabel(startDate, endDate) {
