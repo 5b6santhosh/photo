@@ -50,7 +50,7 @@
 
 const jwt = require('jsonwebtoken');
 
-const JWT_SECRET = process.env.JWT_SECRET || 'super_secret_key';
+const JWT_SECRET = process.env.JWT_SECRET || 'mySuperSecretLongRandomString123!@#4567890abcdefghijklmnopqrstuvwxyz';
 
 const verifyToken = (req, res, next) => {
     const authHeader = req.headers.authorization;
