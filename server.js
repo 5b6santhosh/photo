@@ -1,36 +1,3 @@
-// require('dotenv').config();
-// const express = require('express');
-// const mongoose = require('mongoose');
-// const cors = require('cors');
-// const path = require('path');
-
-// const app = express();
-
-// // Middleware
-// app.use(cors());
-// app.use(express.json());
-
-// // Static Files
-// app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
-// app.use(express.static(path.join(__dirname, 'public')));
-
-// // Routes - Keep them organized
-// app.use('/api/auth', require('./routes/auth'));
-// app.use('/api/home', require('./routes/home'));
-// app.use('/api/uploads', require('./routes/uploads'));
-// app.use('/api/contest', require('./routes/contestParticipation'));
-// app.use('/api/likes', require('./routes/likes'));
-
-// // Database Connection
-// const dbURI = process.env.MONGO_URI;
-// //|| "mongodb://localhost:27017/userdb";
-// mongoose.connect(dbURI)
-//   .then(() => console.log('MongoDB connected'))
-//   .catch(err => console.error('DB connection error:', err));
-
-// app.listen(3000, () => {
-//   console.log('Server running on http://localhost:3000');
-// });
 
 
 require('dotenv').config();
@@ -46,12 +13,26 @@ app.use(cors());
 app.use(express.json({ limit: '50mb' })); // Increase if uploading large files
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
+
+const authRoutes = require('./routes/auth');
+const homeRoutes = require('./routes/home');
+const uploadRoutes = require('./routes/uploads');
+const participationRoutes = require('./routes/contestParticipation');
+const likeRoutes = require('./routes/likes');
+const eventStoriesRoutes = require('./routes/eventStories');
+const adminEventsRouter = require('./routes/admin/events'); // Check folder 'admin'
+const contestStoriesRouter = require('./routes/contestStories');
+
 // === API Routes (MUST come BEFORE static serving) ===
-app.use('/api/auth', require('./routes/auth'));
-app.use('/api/home', require('./routes/home'));
-app.use('/api/uploads', require('./routes/uploads'));
-app.use('/api/contest', require('./routes/contestParticipation'));
-app.use('/api/likes', require('./routes/likes'));
+app.use('/api/auth', authRoutes);
+app.use('/api/home', homeRoutes);
+app.use('/api/uploads', uploadRoutes);
+app.use('/api/contest', participationRoutes);
+app.use('/api/likes', likeRoutes);
+app.use('/api/events', eventStoriesRoutes);
+app.use('/api/admin/events', adminEventsRouter);
+app.use('/api/contests', contestStoriesRouter);
+
 // Add other API routes here...
 
 // === Serve uploaded files ===
@@ -72,16 +53,14 @@ app.use((req, res) => {
 });
 
 // Database Connection
-const dbURI = "mongodb+srv://photoCurator:24101997@photocurator.7wecrld.mongodb.net/?appName=PhotoCurator";
-//process.env.MONGO_URI;
-mongoose.connect(dbURI)
+mongoose.connect(process.env.MONGO_URI)
   .then(() => console.log('MongoDB connected'))
   .catch(err => console.error('DB connection error:', err));
 
 // Use Railway's dynamic port
 const PORT =
-//  process.env.PORT || 
- 3000;
+  //  process.env.PORT || 
+  5000;
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Server running on port ${PORT}`);
 });
