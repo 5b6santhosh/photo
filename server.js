@@ -32,6 +32,8 @@ app.use('/api/likes', likeRoutes);
 app.use('/api/events', eventStoriesRoutes);
 app.use('/api/admin/events', adminEventsRouter);
 app.use('/api/contests', contestStoriesRouter);
+app.use('/api/search', require('./routes/search'));
+app.use('/api/reels', require('./routes/reels'));
 
 // Add other API routes here...
 
