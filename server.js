@@ -37,20 +37,14 @@ app.use((err, req, res, next) => {
   next(err);
 });
 
-app.use(bodyParser.json());
+// app.use(bodyParser.json());
+app.use(express.json());
 
-// MongoDB connection
-//metro.proxy.rlwy.net:38992/userdb
-//mongodb://mongo:tWnrBkLKRCdsWvKqLPgbXOXlyoCADRVE@metro.proxy.rlwy.net:38992
-//const live="mongodb://mongo:tWnrBkLKRCdsWvKqLPgbXOXlyoCADRVE@metro.proxy.rlwy.net:38992";
-const live="mongodb://mongo:QKXvldGkjDJFtoukixXxauKuFJFDWclx@trolley.proxy.rlwy.net:54492";
-//const live="mongodb://localhost:27017/userdb";
-
-mongoose.connect(live, {
-  useNewUrlParser: true,
-  useUnifiedTopology: true
-}).then(() => console.log('MongoDB connected'))
-  .catch(err => console.log(err));
+// === 3. MongoDB Connection (FIXED: Only one connection) ===
+// Priority: Use process.env.MONGO_URI if available, otherwise fallback to hardcoded live string
+mongoose.connect(process.env.MONGO_URI)
+  .then(() => console.log('MongoDB connected successfully'))
+  .catch(err => console.error('MongoDB connection error:', err));
 
 // Routes
 app.use('/api/auth', authRoutes);
@@ -90,8 +84,9 @@ mongoose.connect(process.env.MONGO_URI)
 
 // Use Railway's dynamic port
 const PORT =
-  //  process.env.PORT || 
-  5000;
+   process.env.PORT 
+  // || 
+  // 5000;
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Server running on port ${PORT}`);
 });
