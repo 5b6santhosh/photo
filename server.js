@@ -92,7 +92,6 @@
 // app.listen(PORT, '0.0.0.0', () => {
 //   console.log(`Server running on port ${PORT}`);
 // });
-
 require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
@@ -101,12 +100,18 @@ const path = require('path');
 
 const app = express();
 
-// ── Middleware ───────────────────────────────────────────────
+// Debug: Show environment variables (without sensitive values)
+console.log('Environment check:');
+console.log('PORT from Railway:', process.env.PORT);
+console.log('MONGO_URI exists?', !!process.env.MONGO_URI);
+console.log('BASE_URL:', process.env.BASE_URL);
+
+// Middleware
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-// ── Routes ───────────────────────────────────────────────────
+// Routes
 app.use('/api/auth', require('./routes/auth'));
 app.use('/api/home', require('./routes/home'));
 app.use('/api/uploads', require('./routes/uploads'));
@@ -118,50 +123,55 @@ app.use('/api/contests', require('./routes/contestStories'));
 app.use('/api/search', require('./routes/search'));
 app.use('/api/reels', require('./routes/reels'));
 
-// Serve uploaded files
+// Static files
 app.use('/uploads', express.static(path.join(__dirname, process.env.UPLOAD_DIR || 'uploads')));
-
-// Serve frontend (public folder)
 app.use(express.static(path.join(__dirname, 'public')));
 
-// Root route → serve your main HTML
 app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'file.html'));
 });
 
-// 404 handler
+// Error handlers
 app.use((req, res) => {
   res.status(404).json({ message: 'Route not found' });
 });
 
-// Global error handler (basic version)
 app.use((err, req, res, next) => {
-  console.error('Server error:', err);
-  if (err.message === 'Only PNG and JPG images are allowed') {
-    return res.status(400).json({ message: err.message });
-  }
-  res.status(500).json({ message: 'Something went wrong on the server' });
+  console.error('Global error:', err);
+  res.status(500).json({ message: 'Internal server error' });
 });
 
-// ── MongoDB Connection (ONLY ONCE!) ──────────────────────────
+// ── MongoDB ────────────────────────────────────────────────
 const MONGO_URI = process.env.MONGO_URI;
 
 if (!MONGO_URI) {
-  console.error('CRITICAL ERROR: MONGO_URI is not defined in environment variables!');
+  console.error('FATAL: MONGO_URI is missing in environment variables!');
   process.exit(1);
 }
 
+console.log('Attempting MongoDB connection...');
 mongoose
-  .connect(MONGO_URI)
-  .then(() => console.log('✓ MongoDB connected successfully'))
+  .connect(MONGO_URI, { serverSelectionTimeoutMS: 7500 })
+  .then(() => {
+    console.log('✓ MongoDB connected successfully');
+  })
   .catch((err) => {
     console.error('MongoDB connection FAILED:', err.message);
     process.exit(1);
   });
 
-// ── Start Server ─────────────────────────────────────────────
-const PORT = process.env.PORT || 5000;
+// ── Start Server ───────────────────────────────────────────
+// Near the bottom, replace the port part with:
+
+const PORT = process.env.PORT || 8080;
+
+console.log('PORT environment variable value:', PORT);
+
+if (!PORT) {
+  console.error('ERROR: No PORT environment variable set by Railway! Application will not be reachable.');
+  process.exit(1);
+}
 
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Server is running on port ${PORT}`);
+  console.log(`✓ Server successfully listening on port ${PORT} (Railway assigned port)`);
 });
