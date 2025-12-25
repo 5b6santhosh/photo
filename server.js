@@ -163,7 +163,7 @@ mongoose
 // ── Start Server ───────────────────────────────────────────
 // Near the bottom, replace the port part with:
 
-const PORT = process.env.PORT || 8080;
+const PORT = process.env.PORT || 3000;
 
 console.log('PORT environment variable value:', PORT);
 
