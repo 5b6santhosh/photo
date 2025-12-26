@@ -198,21 +198,30 @@
 // module.exports = router;
 
 
+// routes/uploads.js
 const express = require('express');
 const multer = require('multer');
-const path = require('path');
 const fs = require('fs');
+const path = require('path'); // Optional, for better path handling
 const FileMeta = require('../models/FileMeta');
-const { uploadToProvider } = require('../services/storageService'); // Import service
+const { uploadToProvider } = require('../services/storageService');
 
 const router = express.Router();
-const upload = multer({ dest: 'temp/' }); // Temporary storage before cloud upload
+
+// Use temp storage
+const upload = multer({ dest: 'temp/' });
 
 router.post('/', upload.single('file'), async (req, res) => {
-  try {
-    if (!req.file) return res.status(400).json({ message: 'No file uploaded' });
+  let tempFilePath = null;
 
-    const cloudFile = await uploadToProvider(req.file);
+  try {
+    if (!req.file) {
+      return res.status(400).json({ message: 'No file uploaded' });
+    }
+
+    tempFilePath = req.file.path; // Save path for cleanup
+
+    const cloudFile = await uploadToProvider(req.file); // This deletes the file internally
 
     const meta = new FileMeta({
       fileName: cloudFile.publicId,
@@ -227,9 +236,37 @@ router.post('/', upload.single('file'), async (req, res) => {
 
     await meta.save();
 
-    res.status(201).json({ message: 'File uploaded', file: meta });
+    res.status(201).json({
+      message: 'File uploaded successfully',
+      file: meta
+    });
+
   } catch (error) {
-    res.status(500).json({ message: 'Upload failed', error: error.message });
+    console.error('Upload error:', error);
+
+    // Clean up temp file if it still exists
+    if (tempFilePath && fs.existsSync(tempFilePath)) {
+      try {
+        fs.unlinkSync(tempFilePath);
+      } catch (cleanupError) {
+        console.warn('Cleanup failed:', cleanupError.message);
+      }
+    }
+
+    res.status(500).json({
+      message: 'Upload failed',
+      error: error.message
+    });
+
+  } finally {
+    // Ensure cleanup on exit
+    if (tempFilePath && fs.existsSync(tempFilePath)) {
+      try {
+        fs.unlinkSync(tempFilePath);
+      } catch (e) {
+        // Ignore — just log if needed
+      }
+    }
   }
 });
 
