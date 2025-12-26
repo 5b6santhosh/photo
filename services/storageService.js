@@ -71,7 +71,7 @@ cloudinary.config({
 const uploadToProvider = async (file) => {
     try {
         const result = await cloudinary.uploader.upload(file.path, {
-            folder: 'contest_submissions',
+            folder: 'app_uploads',
             resource_type: 'auto',
             overwrite: false
         });

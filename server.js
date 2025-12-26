@@ -21,7 +21,6 @@ app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 app.use('/api/auth', require('./routes/auth'));
 app.use('/api/home', require('./routes/home'));
 app.use('/api/uploads', require('./routes/uploads'));
-app.use('/api/contest', require('./routes/contestParticipation'));
 app.use('/api/likes', require('./routes/likes'));
 app.use('/api/events', require('./routes/eventStories'));
 app.use('/api/admin/events', require('./routes/admin/events'));
