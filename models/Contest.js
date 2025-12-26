@@ -1,16 +1,3 @@
-// const mongoose = require('mongoose');
-
-// const ContestSchema = new mongoose.Schema({
-//     title: String,
-//     description: String,
-//     bannerImage: String,
-//     isActive: Boolean,
-//     startDate: Date,
-//     endDate: Date,
-//     createdBy: String,
-// }, { timestamps: true });
-
-// module.exports = mongoose.model('Contest', ContestSchema);
 
 const mongoose = require('mongoose');
 
@@ -51,19 +38,19 @@ const ContestSchema = new mongoose.Schema({
         index: true
     },
 
-    submissions: [{
-        userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-        fileId: { type: mongoose.Schema.Types.ObjectId, ref: 'FileMeta', required: true },
-        submittedAt: { type: Date, default: Date.now },
-        status: {
-            type: String,
-            enum: ['pending', 'approved', 'rejected', 'shortlisted'],
-            default: 'pending'
-        }
-    }],
+    // submissions: [{
+    //     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    //     fileId: { type: mongoose.Schema.Types.ObjectId, ref: 'FileMeta', required: true },
+    //     submittedAt: { type: Date, default: Date.now },
+    //     status: {
+    //         type: String,
+    //         enum: ['pending', 'approved', 'rejected', 'shortlisted'],
+    //         default: 'pending'
+    //     }
+    // }],
 
     highlightPhotos: [{ type: mongoose.Schema.Types.ObjectId, ref: 'FileMeta' }],
-    submissionCount: { type: Number, default: 0 },
+    // submissionCount: { type: Number, default: 0 },
     contestStatus: {
         type: String,
         enum: ['draft', 'published', 'ongoing', 'completed', 'cancelled'],
@@ -72,7 +59,19 @@ const ContestSchema = new mongoose.Schema({
     },
 
     isPublic: { type: Boolean, default: true },
-    maxSubmissionsPerUser: { type: Number, default: 3, min: 1 }
+    maxSubmissionsPerUser: { type: Number, default: 1, min: 1 },
+    allowedMediaTypes: [{
+        type: String,
+        enum: ['image', 'video'],
+        default: ['image']
+    }],
+    maxFileSize: {
+        type: Number,
+        default: 50 * 1024 * 1024, // 50MB default
+        min: 1024, // 1KB minimum
+        max: 500 * 1024 * 1024 // 500MB maximum
+    }
+
 
 }, {
     timestamps: true,
@@ -86,12 +85,20 @@ ContestSchema.virtual('isActiveNow').get(function () {
     return this.startDate <= now && this.endDate >= now;
 });
 
-// --- MIDDLEWARE ---
-ContestSchema.pre('save', function (next) {
-    if (this.isModified('submissions')) {
-        this.submissionCount = this.submissions.length;
-    }
-    next();
+// NEW: Helper to check if contest is open for submissions
+ContestSchema.virtual('isOpenForSubmissions').get(function () {
+    const now = new Date();
+    const isActive = this.contestStatus === 'published' || this.contestStatus === 'ongoing';
+    return isActive && this.startDate <= now && this.endDate >= now;
 });
+
+
+// --- MIDDLEWARE ---
+// ContestSchema.pre('save', function (next) {
+//     if (this.isModified('submissions')) {
+//         this.submissionCount = this.submissions.length;
+//     }
+//     next();
+// });
 
 module.exports = mongoose.model('Contest', ContestSchema);

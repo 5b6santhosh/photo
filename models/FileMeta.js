@@ -13,7 +13,23 @@ const FileMetaSchema = new mongoose.Schema({
   likesCount: { type: Number, default: 0 },
   commentsCount: { type: Number, default: 0 },
   sharesCount: { type: Number, default: 0 },
-  uploadedAt: { type: Date, default: Date.now }
+  uploadedAt: { type: Date, default: Date.now },
+  contestId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Contest',
+    default: null
+  },
+  isSubmission: {
+    type: Boolean,
+    default: false
+  },
+  cloudId: { type: String }, // Useful for deleting or transforming images later
+  visibility: {
+    type: String,
+    enum: ['public', 'private'],
+    default: 'public'
+  }
+
 
 }, {
   timestamps: { createdAt: 'uploadedAt', updatedAt: 'updatedAt' }

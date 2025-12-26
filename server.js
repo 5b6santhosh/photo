@@ -92,6 +92,7 @@
 // app.listen(PORT, '0.0.0.0', () => {
 //   console.log(`Server running on port ${PORT}`);
 // });
+
 require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
@@ -122,6 +123,8 @@ app.use('/api/admin/events', require('./routes/admin/events'));
 app.use('/api/contests', require('./routes/contestStories'));
 app.use('/api/search', require('./routes/search'));
 app.use('/api/reels', require('./routes/reels'));
+app.use('/api/feed', require('./routes/feed'));
+app.use('/api/contest-submissions', require('./routes/contestSubmissions'));
 
 // Static files
 app.use('/uploads', express.static(path.join(__dirname, process.env.UPLOAD_DIR || 'uploads')));
@@ -163,15 +166,8 @@ mongoose
 // ── Start Server ───────────────────────────────────────────
 // Near the bottom, replace the port part with:
 
-const PORT = process.env.PORT || 8080;
-
-console.log('PORT environment variable value:', PORT);
-
-if (!PORT) {
-  console.error('ERROR: No PORT environment variable set by Railway! Application will not be reachable.');
-  process.exit(1);
-}
-
+const PORT = 5000;
+//process.env.PORT || 8080;
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`✓ Server successfully listening on port ${PORT} (Railway assigned port)`);
 });
