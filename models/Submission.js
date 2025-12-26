@@ -37,7 +37,7 @@ const submissionSchema = new mongoose.Schema({
   // Status from Contest model
   status: {
     type: String,
-    enum: ['pending', 'approved', 'rejected', 'shortlisted'],
+    enum: ['pending', 'approved', 'rejected', 'shortlisted', 'winner'],
     default: 'pending'
   },
 

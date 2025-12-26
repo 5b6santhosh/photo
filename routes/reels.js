@@ -1,10 +1,8 @@
+// routes/reels.js
 const express = require('express');
 const router = express.Router();
 const FileMeta = require('../models/FileMeta');
 
-/**
- * GET /api/reels/trending
- */
 router.get('/trending', async (req, res) => {
     try {
         const now = new Date();
@@ -14,16 +12,14 @@ router.get('/trending', async (req, res) => {
                 $match: {
                     archived: false,
                     isCurated: true,
-                    visibility: 'public'
+                    visibility: 'public',
+                    mimeType: { $regex: '^video/' } // Only videos
                 }
             },
             {
                 $addFields: {
                     freshnessScore: {
-                        $divide: [
-                            { $subtract: [now, '$uploadedAt'] },
-                            -86400000 // days (negative so newer = higher)
-                        ]
+                        $divide: [{ $subtract: [now, '$uploadedAt'] }, -86400000]
                     }
                 }
             },
@@ -42,28 +38,38 @@ router.get('/trending', async (req, res) => {
             { $sort: { score: -1 } },
             { $limit: 20 },
             {
+                $lookup: {
+                    from: 'users',
+                    localField: 'createdBy',
+                    foreignField: '_id',
+                    as: 'user'
+                }
+            },
+            {
+                $unwind: { path: '$user', preserveNullAndEmptyArrays: true }
+            },
+            {
                 $project: {
                     _id: 1,
-                    fileName: 1,
+                    path: 1,
                     likesCount: 1,
                     score: 1,
-                    createdByName: 1
+                    userName: { $ifNull: ['$user.name', 'Curator'] }
                 }
             }
         ]);
 
         res.json(
             reels.map(r => ({
-                id: r._id,
-                imageUrl: `${process.env.BASE_URL}/uploads/${r.fileName}`,
+                id: r._id.toString(),
+                imageUrl: r.path, //  Cloud video URL (works for thumbnails too)
                 likes: r.likesCount,
                 score: Math.round(r.score),
-                userName: r.createdByName || 'Curator'
+                userName: r.userName
             }))
         );
-
     } catch (err) {
-        console.error(err);
+        console.error("TRENDING_REELS_ERROR:", err);
         res.status(500).json({ message: 'Trending reels failed' });
     }
 });
