@@ -17,9 +17,9 @@ router.get('/:id/stories', async (req, res) => {
 
         const stories = photos.map(p => ({
             id: p._id,
-            imageUrl: `${process.env.BASE_URL}/uploads/${p.fileName}`,
-            title: p.title || 'Curated shot',
-            createdBy: p.createdByName
+            imageUrl: p.path, //  Cloudinary URL from FileMeta.path
+            title: p.description || 'Curated shot', // description = caption
+            createdBy: "Curator" // or populate user if needed
         }));
 
         res.json({

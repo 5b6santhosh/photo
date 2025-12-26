@@ -9,8 +9,8 @@ const User = require('../models/User');
 
 router.get('/', async (req, res) => {
     try {
-        const q = req.query.q || '';
-        if (!q.trim()) {
+        const q = req.query.q?.trim() || '';
+        if (!q) {
             return res.json({ events: [], reels: [], curators: [] });
         }
 
@@ -24,7 +24,10 @@ router.get('/', async (req, res) => {
         const reels = await FileMeta.find({
             archived: false,
             isCurated: true,
-            title: regex,
+            $or: [
+                { description: regex }, // caption
+                { originalName: regex }
+            ]
         }).limit(12).lean();
 
         const curators = await User.find({

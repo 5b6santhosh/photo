@@ -70,7 +70,8 @@ const ContestSchema = new mongoose.Schema({
         default: 50 * 1024 * 1024, // 50MB default
         min: 1024, // 1KB minimum
         max: 500 * 1024 * 1024 // 500MB maximum
-    }
+    },
+    visibility: { type: String, enum: ['public', 'private'], default: 'public' }
 
 
 }, {

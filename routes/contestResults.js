@@ -1,35 +1,27 @@
-const express = require('express');
-const ContestEntry = require('../models/ContestEntry');
+// routes/admin/declareWinners.js
+const Submission = require('../models/Submission'); // 
 
-const router = express.Router();
-
-/**
- * ADMIN: Declare winners
- */
 router.post('/declare', async (req, res) => {
-    const { contestId, winners } = req.body;
-    // winners = [{ entryId, position }]
+    const { contestId, winners } = req.body; // winners = [{ entryId, position }]
 
     for (const w of winners) {
-        await ContestEntry.findByIdAndUpdate(w.entryId, {
-            status: w.position, // winner / shortlisted
-        });
+        // Map position to status
+        let status = 'submitted';
+        if (w.position === 1) status = 'winner';
+        else if (w.position <= 3) status = 'shortlisted';
+
+        await Submission.findByIdAndUpdate(w.entryId, { status });
     }
 
     res.json({ success: true });
 });
 
-/**
- * USER: Get my result
- */
 router.get('/my/:contestId', async (req, res) => {
     const { contestId } = req.params;
     const userId = req.user.id;
 
-    const entry = await ContestEntry.findOne({ contestId, userId })
+    const submission = await Submission.findOne({ contestId, userId })
         .populate('fileId');
 
-    res.json(entry);
+    res.json(submission);
 });
-
-module.exports = router;

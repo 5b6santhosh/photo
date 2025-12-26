@@ -28,7 +28,12 @@ const FileMetaSchema = new mongoose.Schema({
     type: String,
     enum: ['public', 'private'],
     default: 'public'
-  }
+  },
+  title: { type: String, default: '' },
+  category: { type: String, default: 'other' },
+  location: { type: String, default: '' },
+  peopleCount: { type: Number, default: 0 },
+
 
 
 }, {
