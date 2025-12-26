@@ -5,6 +5,7 @@ const User = require('../models/User');
 const FileMeta = require('../models/FileMeta');
 const Contest = require('../models/Contest');
 const Like = require('../models/Like');
+const Submission = require('../models/Submission');
 
 // Helper function to format time labels
 function formatTimeLabel(startDate, endDate) {
@@ -22,7 +23,7 @@ function formatTimeLabel(startDate, endDate) {
 }
 
 // Helper function to map contest data
-function mapContest(contest, userId, photoMap) {
+function mapContest(contest, userId, photoMap, submissionStats) {
     const now = new Date();
     const startDate = new Date(contest.startDate);
     const endDate = new Date(contest.endDate);
@@ -37,8 +38,8 @@ function mapContest(contest, userId, photoMap) {
     const isCompleted = status === 'completed';
 
     // Handle submissions
-    const submissions = Array.isArray(contest.submissions) ? contest.submissions : [];
-    const mySubmissions = userId ? submissions.filter(s => s.userId?.toString() === userId).length : 0;
+    const stats = submissionStats[contest._id.toString()] || { total: 0, myCount: 0 };
+
 
     // Map highlight photos
     const highlightPhotos = (contest.highlightPhotos || []).map(id => {
@@ -66,8 +67,8 @@ function mapContest(contest, userId, photoMap) {
         startDate: startDate.toISOString(),
         endDate: endDate.toISOString(),
         timeLabel: formatTimeLabel(startDate, endDate),
-        totalSubmissions: submissions.length,
-        mySubmissions,
+        totalSubmissions: stats.total,
+        mySubmissions: stats.myCount,
         highlightPhotos
     };
 }
@@ -85,11 +86,34 @@ router.get('/', async (req, res) => {
             userWins = user?.wins || 0;
         }
 
-        // 2. Fetch all contests
-        const contests = await Contest.find()
-            .populate('submissions.userId', 'name')
-            .sort({ startDate: 1 })
-            .lean();
+        // 2. Fetch all contests (NO populate on submissions)
+        const contests = await Contest.find().sort({ startDate: 1 }).lean();
+        const contestIds = contests.map(c => c._id);
+
+        // 3. Fetch all submissions for these contests
+        let allSubmissions = [];
+        if (contestIds.length > 0) {
+            allSubmissions = await Submission.find({
+                contestId: { $in: contestIds }
+            }).select('contestId userId').lean();
+        }
+
+        // 4. Build submission stats: { [contestId]: { total, myCount } }
+        const submissionStats = {};
+        contestIds.forEach(id => {
+            submissionStats[id.toString()] = { total: 0, myCount: 0 };
+        });
+
+        allSubmissions.forEach(sub => {
+            const cid = sub.contestId.toString();
+            if (submissionStats[cid]) {
+                submissionStats[cid].total += 1;
+                if (userId && sub.userId?.toString() === userId) {
+                    submissionStats[cid].myCount += 1;
+                }
+            }
+        });
+
 
         // 3. Pre-fetch highlight photos
         const allHighlightIds = contests.flatMap(c =>
@@ -108,7 +132,7 @@ router.get('/', async (req, res) => {
         }
 
         // 4. Map all events
-        const events = contests.map(c => mapContest(c, userId, photoMap));
+        const events = contests.map(c => mapContest(c, userId, photoMap, submissionStats));
 
         // 5. Determine hero event
         let heroEvent = events.find(e => e.isActive) ||
@@ -141,7 +165,7 @@ router.get('/', async (req, res) => {
             }
             return {
                 id: p._id.toString(),
-                imageUrl: `${process.env.BASE_URL}/uploads/${p.fileName}`,
+                imageUrl: p.path, //  Use cloud URL directly (from FileMeta.path)
                 userName: p.createdByName || 'Curator',
                 isCurated: p.isCurated || false,
                 likes: p.likesCount || 0,
