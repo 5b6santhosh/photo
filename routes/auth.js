@@ -48,6 +48,9 @@ router.post('/login', async (req, res) => {
     // Generate API key
     const apiKey = crypto.randomBytes(32).toString('hex');
     user.apikey = apiKey;
+    user.login_date = new Date();
+
+    
     await user.save();
 
     res.status(200).json({
