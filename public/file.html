@@ -35,14 +35,14 @@ async function uploadFile() {
     formData.append("description", description);
 
     try {
-        const live_url="https://photo-production-662b.up.railway.app/api/uploads";
-        //const live_url="http://localhost:3000/api/uploads";
+        //const live_url="https://photo-production-662b.up.railway.app/api/uploads";
+        const live_url="http://localhost:10000/api/uploads";
 
         const response = await fetch(live_url, {
             method: "POST",
             headers: {
-                "x-user-id": "user456" // custom header
-                // 👇 DO NOT SET Content-Type. Fetch will auto-set multipart/form-data
+                "x-user-id": "user456", // custom header
+                "x-api-key":"5b250999-ce9e-4f48-91a1-ccbb902e129f"
             },
             body: formData
         });
