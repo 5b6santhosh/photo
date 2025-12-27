@@ -70,7 +70,8 @@ mongoose
 // ── Start Server ───────────────────────────────────────────
 // Near the bottom, replace the port part with:
 
-const PORT = 5000;
+// const PORT = 5000;
+const PORT = process.env.PORT || 5000;
 //process.env.PORT || 8080;
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`✓ Server successfully listening on port ${PORT} (Railway assigned port)`);
