@@ -230,6 +230,9 @@ router.post('/', upload.single('file'), async (req, res) => {
       size: req.file.size,
       path: cloudFile.url,
       cloudId: cloudFile.publicId,
+      isVideo: req.file.mimetype.startsWith('video/'),
+      thumbnailUrl: cloudFile.thumbnailUrl || null,
+      isCurated: false,
       createdBy: req.headers['x-user-id'] || 'anonymous',
       description: req.body.description
     });

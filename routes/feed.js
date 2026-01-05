@@ -4,6 +4,7 @@ const router = express.Router();
 const FileMeta = require('../models/FileMeta');
 const Like = require('../models/Like');
 const User = require('../models/User');
+const Following = require('../models/Following');
 
 router.get('/', async (req, res) => {
     try {
@@ -15,18 +16,47 @@ router.get('/', async (req, res) => {
             visibility: 'public'
         })
             .populate('createdBy', 'name avatarUrl') //  Get user info safely
+            .populate('event', 'title startDate endDate')
             .sort({ uploadedAt: -1 })
-            .limit(50)
+            .limit(100)
             .lean();
+
+        const followingUserIds = userId
+            ? await Following.find({ follower: userId }).distinct('following')
+            : [];
+
 
         const feed = files.map(f => {
             const isVideo = f.mimeType.startsWith('video/');
+            // 🔹 Event status
+            const eventId = f.event?._id?.toString();
+            let eventStatus = 'general';
+            if (f.event) {
+                const now = new Date();
+                if (now < f.event.startDate) eventStatus = 'upcoming';
+                else if (now > f.event.endDate) eventStatus = 'completed';
+                else eventStatus = 'active';
+            }
+
+            // 🔹 Is from a user I follow?
+            const isFromFollowing = followingUserIds.includes(f.createdBy?._id.toString());
+
+            // 🔹 Is my own event?
+            const isMyEvent = f.event?.createdBy?.toString() === userId;
+
             return {
                 id: f._id.toString(),
                 mediaType: isVideo ? 'reel' : 'image',
-                imageUrl: isVideo ? null : f.path, //  Use cloud URL
-                videoUrl: isVideo ? f.path : null, //  Same URL works for Cloudinary video
-                eventTitle: "General", // or link to Event model if you have one
+                photo: {
+                    id: f._id.toString(),
+                    title: f.title || 'Untitled',
+                    imageUrl: isVideo ? f.thumbnailUrl : f.path,
+                    category: f.category || 'other',
+                }, videoUrl: isVideo ? f.path : null, //  Same URL works for Cloudinary video
+                eventTitle: f.event?.title || 'General',
+                eventStatus, //  'active', 'upcoming', 'completed', 'general'
+                isMyEvent,   //  for "My Events" filter
+                isFromFollowing, //  for "Following" tab
                 likes: f.likesCount || 0,
                 comments: f.commentsCount || 0,
                 isLiked: false, // We'll set this below if userId exists

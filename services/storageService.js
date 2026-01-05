@@ -68,29 +68,38 @@ cloudinary.config({
  * @param {Object} file - Multer file object
  * @returns {Object} { url, publicId }
  */
+
 const uploadToProvider = async (file) => {
     try {
-        const result = await cloudinary.uploader.upload(file.path, {
-            folder: 'app_uploads',
-            resource_type: 'auto',
-            overwrite: false
-        });
+        const isVideo = file.mimetype.startsWith('video/');
 
-        // Clean up temp file
+        const uploadOptions = {
+            folder: 'app_uploads',
+            resource_type: isVideo ? 'video' : 'image',
+            overwrite: false
+        };
+
+        const result = await cloudinary.uploader.upload(file.path, uploadOptions);
+
+        const thumbnailUrl = isVideo
+            ? cloudinary.url(result.public_id, {
+                resource_type: 'video',
+                format: 'jpg',
+                transformation: [{ width: 400, crop: 'scale' }],
+            })
+            : null;
+
+        // Clean up
         if (fs.existsSync(file.path)) {
             fs.unlinkSync(file.path);
         }
 
         return {
-            url: result.secure_url,
-            publicId: result.public_id
+            url: result.secure_url,      // full media URL
+            publicId: result.public_id,
+            thumbnailUrl: thumbnailUrl,  // only for videos
         };
     } catch (error) {
-        // Clean up on error
-        if (fs.existsSync(file.path)) {
-            fs.unlinkSync(file.path);
-        }
-        console.error('Cloudinary upload error:', error);
         throw new Error(`Upload failed: ${error.message}`);
     }
 };
