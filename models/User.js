@@ -1,15 +1,29 @@
 const mongoose = require('mongoose');
 
 const UserSchema = new mongoose.Schema({
-  username: { type: String, required: true, unique: true },
-  email: { type: String, required: true, unique: true },
+  username: {
+    type: String, required: true, unique: true, trim: true
+  },
+  email: {
+    type: String, required: true, unique: true, lowercase: true,
+    trim: true
+  },
   password: { type: String, required: true },
-  apikey: { type: String },
+  login_date: {
+    type: Date,
+    default: null
+  },
+  apikey: {
+    type: String, default: null,
+    index: true
+  },
   avatarUrl: { type: String, default: '' },
   wins: { type: Number, default: 0 },
   bio: { type: String, default: '' },
   followersCount: { type: Number, default: 0 },
   followingCount: { type: Number, default: 0 },
+
+  timestamps: true
 
 });
 
