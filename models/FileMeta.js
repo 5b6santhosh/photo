@@ -14,7 +14,7 @@ const FileMetaSchema = new mongoose.Schema({
   commentsCount: { type: Number, default: 0 },
   sharesCount: { type: Number, default: 0 },
   uploadedAt: { type: Date, default: Date.now },
-  contestId: {
+  event: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Contest',
     default: null
@@ -33,7 +33,9 @@ const FileMetaSchema = new mongoose.Schema({
   category: { type: String, default: 'other' },
   location: { type: String, default: '' },
   peopleCount: { type: Number, default: 0 },
-
+  isVideo: { type: Boolean, default: false },
+  thumbnailUrl: { type: String },
+  isCurated: { type: Boolean, default: false },
 
 
 }, {

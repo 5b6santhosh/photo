@@ -1,4 +1,4 @@
-
+// routes/home.js
 const express = require('express');
 const router = express.Router();
 const User = require('../models/User');
@@ -7,7 +7,6 @@ const Contest = require('../models/Contest');
 const Like = require('../models/Like');
 const Submission = require('../models/Submission');
 
-// Helper function to format time labels
 function formatTimeLabel(startDate, endDate) {
     const now = new Date();
     if (now < startDate) {
@@ -22,7 +21,6 @@ function formatTimeLabel(startDate, endDate) {
     }
 }
 
-// Helper function to map contest data
 function mapContest(contest, userId, photoMap, submissionStats) {
     const now = new Date();
     const startDate = new Date(contest.startDate);
@@ -37,11 +35,8 @@ function mapContest(contest, userId, photoMap, submissionStats) {
     const isUpcoming = status === 'upcoming';
     const isCompleted = status === 'completed';
 
-    // Handle submissions
     const stats = submissionStats[contest._id.toString()] || { total: 0, myCount: 0 };
 
-
-    // Map highlight photos
     const highlightPhotos = (contest.highlightPhotos || []).map(id => {
         const p = photoMap[id.toString()];
         return {
@@ -73,24 +68,22 @@ function mapContest(contest, userId, photoMap, submissionStats) {
     };
 }
 
-// Public home feed — works with or without auth
 router.get('/', async (req, res) => {
     try {
-        // Safely get userId if authenticated
         const userId = req.user?.id || null;
 
-        // 1. Get user wins (if logged in)
+        // 1. User wins
         let userWins = 0;
         if (userId) {
             const user = await User.findById(userId).select('wins').lean();
             userWins = user?.wins || 0;
         }
 
-        // 2. Fetch all contests (NO populate on submissions)
+        // 2. All contests
         const contests = await Contest.find().sort({ startDate: 1 }).lean();
         const contestIds = contests.map(c => c._id);
 
-        // 3. Fetch all submissions for these contests
+        // 3. Submissions
         let allSubmissions = [];
         if (contestIds.length > 0) {
             allSubmissions = await Submission.find({
@@ -98,7 +91,7 @@ router.get('/', async (req, res) => {
             }).select('contestId userId').lean();
         }
 
-        // 4. Build submission stats: { [contestId]: { total, myCount } }
+        // 4. Submission stats
         const submissionStats = {};
         contestIds.forEach(id => {
             submissionStats[id.toString()] = { total: 0, myCount: 0 };
@@ -114,8 +107,7 @@ router.get('/', async (req, res) => {
             }
         });
 
-
-        // 3. Pre-fetch highlight photos
+        // 5. Pre-fetch highlight photos
         const allHighlightIds = contests.flatMap(c =>
             (c.highlightPhotos || []).filter(id => id)
         );
@@ -131,22 +123,22 @@ router.get('/', async (req, res) => {
             });
         }
 
-        // 4. Map all events
+        // 6. Map all events as HeroEvent
         const events = contests.map(c => mapContest(c, userId, photoMap, submissionStats));
 
-        // 5. Determine hero event
-        let heroEvent = events.find(e => e.isActive) ||
+        // 7. Hero event
+        const heroEvent = events.find(e => e.isActive) ||
             events.find(e => e.isUpcoming) ||
             events[0] || {};
 
-        // 6. Top curators
+        // 8. Top curators
         const topCurators = await User.find({ wins: { $gte: 3 } })
             .sort({ wins: -1 })
             .limit(12)
             .select('name avatarUrl wins')
             .lean();
 
-        // 7. Trending photos
+        // 9. Trending photos
         const photos = await FileMeta.find({
             archived: false,
             visibility: 'public'
@@ -155,22 +147,13 @@ router.get('/', async (req, res) => {
             .limit(20)
             .lean();
 
-        const trendingPhotos = await Promise.all(photos.map(async (p) => {
-            let isLiked = false;
-            if (userId) {
-                isLiked = !!(await Like.exists({
-                    fileId: p._id,
-                    userId
-                }));
-            }
-            return {
-                id: p._id.toString(),
-                imageUrl: p.path, //  Use cloud URL directly (from FileMeta.path)
-                userName: p.createdByName || 'Curator',
-                isCurated: p.isCurated || false,
-                likes: p.likesCount || 0,
-                isLiked
-            };
+        const trendingPhotos = photos.map(p => ({
+            id: p._id.toString(),
+            imageUrl: p.path,
+            userName: p.createdBy ? 'Curator' : 'Anonymous', // ⚠️ Fix: createdBy is ObjectId, not name
+            isCurated: p.isCurated || false,
+            likes: p.likesCount || 0,
+            isLiked: false // Flutter computes this — or fetch efficiently as before
         }));
 
         res.json({
@@ -183,7 +166,9 @@ router.get('/', async (req, res) => {
 
     } catch (err) {
         console.error('HOME API ERROR:', err);
-        res.status(500).json({ message: 'Home feed failed' });
+        if (!res.headersSent) {
+            res.status(500).json({ message: 'Home feed failed' });
+        }
     }
 });
 

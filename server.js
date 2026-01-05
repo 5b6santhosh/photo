@@ -29,6 +29,10 @@ app.use('/api/search', require('./routes/search'));
 app.use('/api/reels', require('./routes/reels'));
 app.use('/api/feed', require('./routes/feed'));
 app.use('/api/contest-submissions', require('./routes/contestSubmissions'));
+app.use('/api/shares', require('./routes/shares'));
+app.use('/api/reports', require('./routes/reports'));
+app.use('/api/profile', require('./routes/profile'));
+
 
 // Static files
 app.use('/uploads', express.static(path.join(__dirname, process.env.UPLOAD_DIR || 'uploads')));
@@ -70,8 +74,8 @@ mongoose
 // ── Start Server ───────────────────────────────────────────
 // Near the bottom, replace the port part with:
 
-// const PORT = 5000;
-const PORT = process.env.PORT || 10000;
+const PORT = 5000;
+// const PORT = process.env.PORT || 10000;
 //process.env.PORT || 8080;
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`✓ Server successfully listening on port ${PORT} (Railway assigned port)`);
