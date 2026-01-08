@@ -1,6 +1,3 @@
-
-
-
 // routes/uploads.js
 const express = require('express');
 const multer = require('multer');
@@ -28,14 +25,14 @@ router.post('/', upload.single('file'), async (req, res) => {
 
     tempFilePath = req.file.path; // Save path for cleanup
 
+    const allowedTypes = ['image/png', 'image/jpeg', 'video/mp4'];
+
+    if (!allowedTypes.includes(req.file.mimetype)) {
+      if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+      return res.status(400).json({ message: 'Only PNG and JPG images are allowed' });
+    }
+
     const cloudFile = await uploadToProvider(req.file); // This deletes the file internally
-
-
-    const allowedTypes = ['image/png', 'image/jpeg'];
-
-      if (!allowedTypes.includes(req.file.mimetype)) {
-        return res.status(400).json({ message: 'Only PNG and JPG images are allowed' });
-      }
 
     const meta = new FileMeta({
       fileName: cloudFile.publicId,

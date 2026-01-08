@@ -4,6 +4,8 @@ const UserSchema = new mongoose.Schema({
   username: {
     type: String, required: true, unique: true, trim: true
   },
+  firstName: { type: String, default: '' }, 
+  lastName: { type: String, default: '' }, 
   email: {
     type: String, required: true, unique: true, lowercase: true,
     trim: true
@@ -20,6 +22,7 @@ const UserSchema = new mongoose.Schema({
   avatarUrl: { type: String, default: '' },
   wins: { type: Number, default: 0 },
   bio: { type: String, default: '' },
+  streakDays: { type: Number, default: 0 },
   followersCount: { type: Number, default: 0 },
   followingCount: { type: Number, default: 0 },
 

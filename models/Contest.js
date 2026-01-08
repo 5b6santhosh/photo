@@ -54,17 +54,17 @@ const ContestSchema = new mongoose.Schema({
     contestStatus: {
         type: String,
         enum: ['draft', 'published', 'ongoing', 'completed', 'cancelled'],
-        default: 'draft',
+        default: 'published',
         index: true
     },
 
     isPublic: { type: Boolean, default: true },
     maxSubmissionsPerUser: { type: Number, default: 1, min: 1 },
-    allowedMediaTypes: [{
-        type: String,
+    allowedMediaTypes: {
+        type: [String],
         enum: ['image', 'video'],
         default: ['image']
-    }],
+    },
     maxFileSize: {
         type: Number,
         default: 50 * 1024 * 1024, // 50MB default
@@ -89,10 +89,9 @@ ContestSchema.virtual('isActiveNow').get(function () {
 // NEW: Helper to check if contest is open for submissions
 ContestSchema.virtual('isOpenForSubmissions').get(function () {
     const now = new Date();
-    const isActive = this.contestStatus === 'published' || this.contestStatus === 'ongoing';
+    const isActive = ['published', 'ongoing'].includes(this.contestStatus);
     return isActive && this.startDate <= now && this.endDate >= now;
 });
-
 
 // --- MIDDLEWARE ---
 // ContestSchema.pre('save', function (next) {
@@ -101,5 +100,20 @@ ContestSchema.virtual('isOpenForSubmissions').get(function () {
 //     }
 //     next();
 // });
+
+// UPGRADE: Auto-set status based on dates if not "draft"
+ContestSchema.pre('save', function (next) {
+    if (this.contestStatus !== 'draft' && this.contestStatus !== 'cancelled') {
+        const now = new Date();
+        if (now < this.startDate) {
+            this.contestStatus = 'published'; // Upcoming
+        } else if (now >= this.startDate && now <= this.endDate) {
+            this.contestStatus = 'ongoing';
+        } else {
+            this.contestStatus = 'completed';
+        }
+    }
+    next();
+});
 
 module.exports = mongoose.model('Contest', ContestSchema);
