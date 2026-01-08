@@ -17,11 +17,13 @@ router.post(
             const {
                 title,
                 subtitle,
+                description,
                 prizeText,
                 startDate,
                 endDate,
-                allowedTypes // ['photo', 'reel']
-            } = req.body;
+                allowedMediaTypes, // Matching Schema name
+                bannerImage,
+                maxSubmissionsPerUser } = req.body;
 
             if (!title || !startDate || !endDate) {
                 return res.status(400).json({ message: 'Missing required fields' });
@@ -31,15 +33,14 @@ router.post(
             const contest = await Contest.create({
                 title,
                 subtitle,
-                prizeText,
-                startDate,
-                endDate,
-                allowedTypes,
-                // createdBy: req.user.id,
-                createdBy: creatorId, // fallback dummy ObjectId
-                status: 'upcoming',
-                submissions: [],
-                highlightPhotos: []
+                description,
+                prizeText: prizeText || undefined, // Uses Schema default if empty
+                startDate: new Date(startDate),
+                endDate: new Date(endDate),
+                allowedMediaTypes: allowedMediaTypes || ['image'],
+                bannerImage,
+                maxSubmissionsPerUser: maxSubmissionsPerUser || 1,
+                createdBy: creatorId,
             });
 
             res.status(201).json({

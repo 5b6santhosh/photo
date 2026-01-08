@@ -90,9 +90,7 @@ const uploadToProvider = async (file) => {
             : null;
 
         // Clean up
-        if (fs.existsSync(file.path)) {
-            fs.unlinkSync(file.path);
-        }
+        await fs.promises.unlink(file.path).catch(() => { });
 
         return {
             url: result.secure_url,      // full media URL
@@ -100,6 +98,7 @@ const uploadToProvider = async (file) => {
             thumbnailUrl: thumbnailUrl,  // only for videos
         };
     } catch (error) {
+        await fs.promises.unlink(file.path).catch(() => { });
         throw new Error(`Upload failed: ${error.message}`);
     }
 };
