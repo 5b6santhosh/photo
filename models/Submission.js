@@ -26,13 +26,6 @@ const submissionSchema = new mongoose.Schema({
     enum: ['image', 'video'],
     required: true
   },
-  // mediaUrl: {
-  //   type: String,
-  //   required: true
-  // },
-  // thumbnailUrl: {
-  //   type: String
-  // },
 
   // Status from Contest model
   status: {
@@ -53,6 +46,11 @@ const submissionSchema = new mongoose.Schema({
   updatedAt: {
     type: Date,
     default: Date.now
+  },
+  contestEntryId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'ContestEntry',
+    required: true
   }
 });
 submissionSchema.index({ contestId: 1, userId: 1 }); // Fast: "Get my submissions for contest X"

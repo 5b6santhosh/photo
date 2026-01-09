@@ -3,14 +3,12 @@ const express = require('express');
 const router = express.Router();
 const multer = require('multer');
 const fs = require('fs');
-const path = require('path');
 const mongoose = require('mongoose');
-const razorpay = require('../services/razorpay');
 const contestUpload = require('../middleware/contestUpload');
 const Contest = require('../models/Contest');
 const FileMeta = require('../models/FileMeta');
 const Submission = require('../models/Submission');
-const Payment = require('../models/Payment');
+const ContestEntry = require('../models/ContestEntry');
 const { uploadToProvider, deleteFromProvider } = require('../services/storageService');
 
 //  Use temp storage for cloud upload
@@ -59,14 +57,18 @@ const buildFileResponse = (fileMeta) => {
 
 // Submit to contest
 router.post('/:id/submit', contestUpload, upload.single('media'), async (req, res) => {
-    // Start a Session for Atomicity
     const session = await mongoose.startSession();
     session.startTransaction();
     let cloudFile;
+
     try {
         const { id: contestId } = req.params;
         const userId = req.user.id;
-        const { caption, paymentId } = req.body;
+        const { caption } = req.body;
+
+        if (!mongoose.Types.ObjectId.isValid(contestId)) {
+            return res.status(400).json({ message: 'Invalid contest ID' });
+        }
 
         if (!req.file) {
             return res.status(400).json({
@@ -74,88 +76,46 @@ router.post('/:id/submit', contestUpload, upload.single('media'), async (req, re
             });
         }
 
-
-        //  VALIDATE CONTEST
+        // ─────────────────────────────────────────────
+        // VALIDATE CONTEST
+        // ─────────────────────────────────────────────
         const contest = await Contest.findById(contestId).session(session);
         if (!contest) {
             return res.status(404).json({ message: 'Contest not found' });
         }
+
         if (!contest.isOpenForSubmissions) {
             return res.status(400).json({
                 message: `Submissions are closed for "${contest.title}"`
             });
         }
-        if (!mongoose.Types.ObjectId.isValid(contestId)) {
-            return res.status(400).json({ message: 'Invalid contest ID' });
-        }
+
+        // ─────────────────────────────────────────────
+        //  PAID CONTEST ENTRY CHECK (ContestEntry based)
+        // ─────────────────────────────────────────────
+        let contestEntry = null;
 
         if (contest.entryFee > 0) {
-            // PAID EVENT → REQUIRE payment verification
-            if (!paymentId) {
-                return res.status(400).json({
-                    message: 'Payment required for this event'
-                });
-            }
-
-            //  STEP 1: Find payment
-            const payment = await Payment.findOne({
-                paymentId,
-                userId,
-                contestId,
-                status: 'verified',
-                used: false
-            }).session(session);
-
-            if (!payment) {
-                await session.abortTransaction();
-                return res.status(400).json({ message: 'Invalid or unverified payment' });
-            }
-
-            //  STEP 2: Fetch Razorpay order to validate amount & currency
-            let order;
-            try {
-                order = await razorpay.orders.fetch(payment.orderId);
-            } catch (err) {
-                console.error('Failed to fetch Razorpay order:', err.message);
-                await session.abortTransaction();
-                return res.status(500).json({ message: 'Payment validation failed' });
-            }
-
-            const expectedAmount = order.notes?.expectedAmount;
-            const expectedCurrency = order.notes?.currency;
-
-            // STEP 3: Validate integrity
-            if (
-                typeof expectedAmount !== 'number' ||
-                !expectedCurrency ||
-                payment.amount !== expectedAmount ||
-                payment.currency !== expectedCurrency
-            ) {
-                // Optional: flag suspicious payment
-                await Payment.findByIdAndUpdate(
-                    payment._id,
-                    { status: 'suspicious' },
-                    { session }
-                );
-                await session.abortTransaction();
-                return res.status(400).json({ message: 'Payment amount or currency mismatch' });
-            }
-
-            // STEP 4: Mark as used ONLY after validation
-            await Payment.findByIdAndUpdate(
-                payment._id,
-                { used: true, usedAt: new Date() },
-                { session }
+            contestEntry = await ContestEntry.findOneAndUpdate(
+                { contestId, userId, status: 'paid' },
+                { $set: { status: 'submitted', submittedAt: new Date() } },
+                { session, new: true }
             );
-
+            if (!contestEntry) {
+                throw new Error('No valid paid entry found or already submitted.');
+            }
         }
 
-        //  ENFORCE SUBMISSION LIMIT (ATOMIC)
+        // ─────────────────────────────────────────────
+        // ENFORCE SUBMISSION LIMIT
+        // ─────────────────────────────────────────────
         const userSubmissionCount = await Submission.countDocuments({
             contestId,
-            userId,
+            userId
         });
+
         if (userSubmissionCount >= contest.maxSubmissionsPerUser) {
+            await session.abortTransaction();
             return res.status(400).json({
                 message: `Max ${contest.maxSubmissionsPerUser} submission(s) allowed`
             });
@@ -168,28 +128,35 @@ router.post('/:id/submit', contestUpload, upload.single('media'), async (req, re
 
         if (existingSubmission) {
             await session.abortTransaction();
-            return res.status(400).json({ message: 'Already submitted to this contest' });
+            return res.status(400).json({
+                message: 'Already submitted to this contest'
+            });
         }
 
-        //  VALIDATE MEDIA TYPE
+        // ─────────────────────────────────────────────
+        // VALIDATE MEDIA TYPE
+        // ─────────────────────────────────────────────
         const mediaType = getMediaType(req.file.mimetype);
         if (!contest.allowedMediaTypes.includes(mediaType)) {
             const allowed = contest.allowedMediaTypes.join(' or ');
+            await session.abortTransaction();
             return res.status(400).json({
                 message: `Only ${allowed} submissions are allowed for this contest`
             });
         }
-        //  Upload to Cloud (Cloudinary, S3, etc.)
+
+        // ─────────────────────────────────────────────
+        // UPLOAD TO CLOUD
+        // ─────────────────────────────────────────────
         cloudFile = await uploadToProvider(req.file);
 
-        // Create FileMeta with cloud data
         const fileMeta = new FileMeta({
-            fileName: cloudFile.publicId,        // Cloudinary public_id
+            fileName: cloudFile.publicId,
             originalName: req.file.originalname,
             mimeType: req.file.mimetype,
             size: req.file.size,
-            path: cloudFile.url,                 // Full cloud URL (e.g., https://res.cloudinary.com/...)
-            cloudId: cloudFile.publicId,         // For deletion/transformation
+            path: cloudFile.url,
+            cloudId: cloudFile.publicId,
             thumbnailUrl: cloudFile.thumbnailUrl,
             createdBy: userId,
             description: caption,
@@ -198,10 +165,14 @@ router.post('/:id/submit', contestUpload, upload.single('media'), async (req, re
         });
 
         await fileMeta.save({ session });
-        // Create Submission
+
+        // ─────────────────────────────────────────────
+        // CREATE SUBMISSION
+        // ─────────────────────────────────────────────
         const submission = new Submission({
             userId,
             contestId,
+            contestEntryId: contestEntry._id,
             fileId: fileMeta._id,
             mediaType,
             caption,
@@ -209,16 +180,23 @@ router.post('/:id/submit', contestUpload, upload.single('media'), async (req, re
         });
 
         await submission.save({ session });
+
+        // ─────────────────────────────────────────────
+        // MARK CONTEST ENTRY AS SUBMITTED
+        // ─────────────────────────────────────────────
+        if (contestEntry) {
+            await ContestEntry.findByIdAndUpdate(
+                contestEntry._id,
+                {
+                    status: 'submitted',
+                    submittedAt: new Date()
+                },
+                { session }
+            );
+        }
+
         await session.commitTransaction();
         session.endSession();
-
-        const safeFileResponse = {
-            id: fileMeta._id,
-            mimeType: fileMeta.mimeType,
-            mediaUrl: fileMeta.path,
-            thumbnailUrl: fileMeta.thumbnailUrl
-        };
-
 
         res.status(201).json({
             success: true,
@@ -230,12 +208,18 @@ router.post('/:id/submit', contestUpload, upload.single('media'), async (req, re
                 caption: submission.caption,
                 status: submission.status,
                 submittedAt: submission.submittedAt,
-                file: safeFileResponse
+                file: {
+                    id: fileMeta._id,
+                    mimeType: fileMeta.mimeType,
+                    mediaUrl: fileMeta.path,
+                    thumbnailUrl: fileMeta.thumbnailUrl
+                }
             }
         });
 
     } catch (error) {
         console.error('Submission error:', error);
+
         if (cloudFile?.publicId) {
             try {
                 await deleteFromProvider(cloudFile.publicId);
@@ -243,8 +227,13 @@ router.post('/:id/submit', contestUpload, upload.single('media'), async (req, re
                 console.error('Cloud cleanup failed:', cleanupErr);
             }
         }
+
         await session.abortTransaction();
-        return res.status(500).json({ message: 'Submission failed', error: error.message });
+        return res.status(500).json({
+            message: 'Submission failed',
+            error: error.message
+        });
+
     } finally {
         session.endSession();
     }

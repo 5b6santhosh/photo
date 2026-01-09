@@ -1,138 +1,8 @@
-// const express = require('express');
-// const crypto = require('crypto');
-// const Payment = require('../models/Payment');
-// const razorpay = require('../services/razorpay');
-// const mongoose = require('mongoose');
-// const router = express.Router();
-
-// router.post('/', async (req, res) => {
-//     const webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET;
-
-//     if (!webhookSecret) {
-//         console.error('RAZORPAY_WEBHOOK_SECRET is not set');
-//         return res.status(500).send('Server misconfigured');
-//     }
-
-//     const signature = req.headers['x-razorpay-signature'];
-//     const body = req.body.toString(); // RAW BODY REQUIRED
-
-//     const expectedSignature = crypto
-//         .createHmac('sha256', webhookSecret)
-//         .update(body)
-//         .digest('hex');
-
-//     if (expectedSignature !== signature) {
-//         console.error('Webhook signature mismatch');
-//         return res.status(400).send('Invalid signature');
-//     }
-
-//     let event;
-//     try {
-//         event = JSON.parse(body);
-//     } catch (e) {
-//         console.error('Failed to parse webhook body:', e.message);
-//         return res.status(400).send('Invalid payload');
-//     }
-
-//     const payload = event.payload;
-
-//     try {
-//         console.log(`Processing Razorpay webhook event: ${event.event}`);
-
-//         switch (event.event) {
-//             case 'payment.captured': {
-//                 const paymentEntity = payload.payment.entity;
-//                 const orderId = paymentEntity.order_id;
-//                 const paymentId = paymentEntity.id;
-
-//                 let order;
-//                 try {
-//                     order = await razorpay.orders.fetch(orderId);
-//                 } catch (err) {
-//                     console.error(`Failed to fetch order ${orderId}:`, err.message);
-//                     return res.status(400).json({ status: 'error', reason: 'order_fetch_failed' });
-//                 }
-
-//                 const contestId = order.notes?.contestId;
-//                 const userId = order.notes?.userId;
-
-//                 if (!contestId || !userId) {
-//                     console.error('Order notes missing contestId or userId:', orderId);
-//                     return res.status(400).json({ status: 'error', reason: 'missing_metadata' });
-//                 }
-
-//                 if (!mongoose.Types.ObjectId.isValid(contestId)) {
-//                     console.error('Invalid contestId in order notes:', contestId);
-//                     return res.status(400).json({ status: 'error', reason: 'invalid_contest_id' });
-//                 }
-
-//                 await Payment.findOneAndUpdate(
-//                     { paymentId },
-//                     {
-//                         userId,
-//                         contestId,
-//                         orderId,
-//                         amount: paymentEntity.amount,
-//                         currency: paymentEntity.currency,
-//                         status: 'verified',
-//                         used: false
-//                     },
-//                     {
-//                         // upsert: true,
-//                         new: true
-//                     }
-//                 );
-
-//                 console.log(`Payment ${paymentId} verified for contest ${contestId}`);
-//                 break;
-//             }
-
-
-//             case 'payment.failed': {
-//                 const paymentId = payload.payment.entity.id;
-//                 await Payment.findOneAndUpdate(
-//                     { paymentId },
-//                     { status: 'failed' },
-//                     { upsert: false }
-//                 );
-//                 console.log(`Payment ${paymentId} failed`);
-//                 break;
-//             }
-
-//             case 'refund.processed': {
-//                 const paymentId = payload.refund.entity.payment_id;
-//                 await Payment.findOneAndUpdate(
-//                     { paymentId },
-//                     {
-//                         status: 'refunded',
-//                         used: false // or true, depending on your business logic
-//                     },
-//                     { upsert: false }
-//                 );
-//                 console.log(`Payment ${paymentId} refunded`);
-//                 break;
-//             }
-
-
-//             default:
-//                 console.log(`Unhandled Razorpay event: ${event.event}`);
-//         }
-
-//         return res.status(200).json({ status: 'ok' });
-
-//     } catch (err) {
-//         console.error('Webhook error:', err);
-//         res.status(500).json({ status: 'error' });
-//     }
-// });
-
-// module.exports = router;
-
-
 const express = require('express');
 const crypto = require('crypto');
 const Payment = require('../models/Payment');
 const razorpay = require('../services/razorpay');
+const ContestEntry = require('../models/ContestEntry');
 
 const router = express.Router();
 
@@ -177,45 +47,68 @@ router.post('/', async (req, res) => {
     try {
         switch (event.event) {
 
-            // ─────────────────────────────────────────────
             case 'payment.captured': {
                 const paymentEntity = event.payload.payment.entity;
                 const paymentId = paymentEntity.id;
 
-                //  Idempotency check
-                const existingPayment = await Payment.findOne({ paymentId });
-                if (!existingPayment) {
-                    console.warn(`Payment ${paymentId} not found. Ignoring.`);
+                const payment = await Payment.findOne({ paymentId });
+                if (!payment) {
+                    console.warn(`Payment ${paymentId} not found`);
                     break;
                 }
 
-                if (existingPayment.status === 'verified') {
-                    console.log(`Payment ${paymentId} already verified. Skipping.`);
+                if (payment.status === 'verified') {
+                    console.log(`Payment ${paymentId} already processed`);
                     break;
                 }
 
-                // Fetch order for verification
                 const order = await razorpay.orders.fetch(paymentEntity.order_id);
 
-                const expectedAmount = order.notes?.expectedAmount;
-                const expectedCurrency = order.notes?.currency;
-
+                // Validate amount & currency
                 if (
-                    paymentEntity.amount !== expectedAmount ||
-                    paymentEntity.currency !== expectedCurrency
+                    paymentEntity.amount !== order.notes?.expectedAmount ||
+                    paymentEntity.currency !== order.notes?.currency
                 ) {
-                    await Payment.findByIdAndUpdate(existingPayment._id, {
+                    await Payment.findByIdAndUpdate(payment._id, {
                         status: 'suspicious'
                     });
-                    console.error(`Amount mismatch for payment ${paymentId}`);
+                    console.error(`Payment ${paymentId} failed validation`);
                     break;
                 }
 
-                await Payment.findByIdAndUpdate(existingPayment._id, {
-                    status: 'verified'
-                });
+                // Mark payment verified
+                payment.status = 'verified';
+                await payment.save();
 
-                console.log(`Payment ${paymentId} verified`);
+                //  AUTO-CONTEST ENTRY
+                try {
+                    await ContestEntry.updateOne(
+                        {
+                            contestId: payment.contestId,
+                            userId: payment.userId
+                        },
+                        {
+                            $setOnInsert: {
+                                contestId: payment.contestId,
+                                userId: payment.userId,
+                                paymentId: payment._id,
+                                status: 'paid'
+                            }
+                        },
+                        {
+                            upsert: true
+                        }
+                    );
+                } catch (err) {
+                    if (err.code === 11000) {
+                        console.log('ContestEntry already exists — safe to ignore');
+                    } else {
+                        throw err;
+                    }
+                }
+                console.log(
+                    `ContestEntry created for user ${payment.userId} in contest ${payment.contestId}`
+                );
                 break;
             }
 
@@ -236,17 +129,23 @@ router.post('/', async (req, res) => {
             case 'refund.processed': {
                 const paymentId = event.payload.refund.entity.payment_id;
 
-                await Payment.findOneAndUpdate(
-                    { paymentId },
-                    {
-                        status: 'refunded',
-                        used: false
-                    }
+                const payment = await Payment.findOne({ paymentId });
+                if (!payment) break;
+
+                await Payment.findByIdAndUpdate(payment._id, {
+                    status: 'refunded',
+                    used: false
+                });
+
+                await ContestEntry.findOneAndUpdate(
+                    { paymentId: payment._id },
+                    { status: 'refunded' }
                 );
 
-                console.log(`Payment ${paymentId} refunded`);
+                console.log(`ContestEntry refunded for payment ${paymentId}`);
                 break;
             }
+
         }
 
         return res.status(200).json({ status: 'ok' });
