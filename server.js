@@ -14,6 +14,8 @@ console.log('BASE_URL:', process.env.BASE_URL);
 
 // Middleware
 app.use(cors());
+app.use('/api/webhooks/razorpay', express.raw({ type: 'application/json' }));
+app.use('/api/webhooks/razorpay', require('./routes/razorpayWebhook'));
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
@@ -32,6 +34,8 @@ app.use('/api/contest-submissions', require('./routes/userContestSubmissions'));
 app.use('/api/shares', require('./routes/shares'));
 app.use('/api/reports', require('./routes/reports'));
 app.use('/api/profile', require('./routes/profile'));
+app.use('/api/payments', require('./routes/payments'));
+
 
 
 // Static files
