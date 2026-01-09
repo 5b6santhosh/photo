@@ -90,6 +90,23 @@ router.post('/verify', auth, async (req, res) => {
 
     const userId = req.user.id;
 
+    // ─────────────────────────────────────────────
+    // 1. Input Validation
+    // ─────────────────────────────────────────────
+    if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature || !contestId) {
+        return res.status(400).json({
+            verified: false,
+            message: 'Missing required payment parameters'
+        });
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(contestId)) {
+        return res.status(400).json({
+            verified: false,
+            message: 'Invalid contest ID'
+        });
+    }
+
     const body = `${razorpay_order_id}|${razorpay_payment_id}`;
     const expectedSignature = crypto
         .createHmac('sha256', process.env.RAZORPAY_KEY_SECRET)
@@ -101,10 +118,6 @@ router.post('/verify', auth, async (req, res) => {
     }
 
     try {
-        if (!mongoose.Types.ObjectId.isValid(contestId)) {
-            return res.status(400).json({ message: 'Invalid contest ID' });
-        }
-
         const order = await razorpay.orders.fetch(razorpay_order_id);
 
         if (order.notes.contestId !== contestId || order.notes?.userId !== userId
@@ -168,7 +181,7 @@ router.post('/verify', auth, async (req, res) => {
             )
         ]);
 
-        res.json({ verified: true, paymentId: payment.paymentId });
+        res.json({ verified: true, paymentId: payment.paymentId, message: 'Payment confirmed successfully' });
 
     } catch (err) {
         console.error(err);

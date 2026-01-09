@@ -36,7 +36,7 @@ const ContestEntrySchema = new mongoose.Schema({
 }, { timestamps: true });
 
 /**
- * 🚫 HARD GUARANTEE
+ *  HARD GUARANTEE
  * One paid entry per user per contest
  */
 ContestEntrySchema.index(
