@@ -71,8 +71,20 @@ const ContestSchema = new mongoose.Schema({
         min: 1024, // 1KB minimum
         max: 500 * 1024 * 1024 // 500MB maximum
     },
-    visibility: { type: String, enum: ['public', 'private'], default: 'public' }
-
+    visibility: { type: String, enum: ['public', 'private'], default: 'public' },
+    entryFee: {
+        type: Number,
+        default: 0, // 0 = free, value in INR (e.g., 50 = ₹50)
+        min: 0
+    },
+    payments: [{
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Payment'
+    }],
+    participants: [{
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User'
+    }]
 
 }, {
     timestamps: true,
@@ -115,5 +127,7 @@ ContestSchema.pre('save', function (next) {
     }
     next();
 });
+ContestSchema.index({ participants: 1 }); // Find contests by participant
+ContestSchema.index({ payments: 1 });     // Find contest by payment
 
 module.exports = mongoose.model('Contest', ContestSchema);

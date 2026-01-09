@@ -4,11 +4,13 @@ const router = express.Router();
 const multer = require('multer');
 const fs = require('fs');
 const path = require('path');
-
+const mongoose = require('mongoose');
+const razorpay = require('../services/razorpay');
 const contestUpload = require('../middleware/contestUpload');
 const Contest = require('../models/Contest');
 const FileMeta = require('../models/FileMeta');
 const Submission = require('../models/Submission');
+const Payment = require('../models/Payment');
 const { uploadToProvider, deleteFromProvider } = require('../services/storageService');
 
 //  Use temp storage for cloud upload
@@ -57,29 +59,101 @@ const buildFileResponse = (fileMeta) => {
 
 // Submit to contest
 router.post('/:id/submit', contestUpload, upload.single('media'), async (req, res) => {
+    // Start a Session for Atomicity
+    const session = await mongoose.startSession();
+    session.startTransaction();
+    let cloudFile;
     try {
         const { id: contestId } = req.params;
-        const userId = req.userId;
-        const caption = req.body.caption || '';
+        const userId = req.user.id;
+        const { caption, paymentId } = req.body;
 
         if (!req.file) {
-            return res.status(400).json({ message: 'Media file is required' });
+            return res.status(400).json({
+                message: 'Please select a photo or video to submit'
+            });
         }
 
+
         //  VALIDATE CONTEST
-        const contest = await Contest.findById(contestId);
+        const contest = await Contest.findById(contestId).session(session);
         if (!contest) {
             return res.status(404).json({ message: 'Contest not found' });
         }
         if (!contest.isOpenForSubmissions) {
-            return res.status(400).json({ message: 'Contest is not open for submissions' });
+            return res.status(400).json({
+                message: `Submissions are closed for "${contest.title}"`
+            });
+        }
+        if (!mongoose.Types.ObjectId.isValid(contestId)) {
+            return res.status(400).json({ message: 'Invalid contest ID' });
+        }
+
+        if (contest.entryFee > 0) {
+            // PAID EVENT → REQUIRE payment verification
+            if (!paymentId) {
+                return res.status(400).json({
+                    message: 'Payment required for this event'
+                });
+            }
+
+            //  STEP 1: Find payment
+            const payment = await Payment.findOne({
+                paymentId,
+                userId,
+                contestId,
+                status: 'verified',
+                used: false
+            }).session(session);
+
+            if (!payment) {
+                await session.abortTransaction();
+                return res.status(400).json({ message: 'Invalid or unverified payment' });
+            }
+
+            //  STEP 2: Fetch Razorpay order to validate amount & currency
+            let order;
+            try {
+                order = await razorpay.orders.fetch(payment.orderId);
+            } catch (err) {
+                console.error('Failed to fetch Razorpay order:', err.message);
+                await session.abortTransaction();
+                return res.status(500).json({ message: 'Payment validation failed' });
+            }
+
+            const expectedAmount = order.notes?.expectedAmount;
+            const expectedCurrency = order.notes?.currency;
+
+            // STEP 3: Validate integrity
+            if (
+                typeof expectedAmount !== 'number' ||
+                !expectedCurrency ||
+                payment.amount !== expectedAmount ||
+                payment.currency !== expectedCurrency
+            ) {
+                // Optional: flag suspicious payment
+                await Payment.findByIdAndUpdate(
+                    payment._id,
+                    { status: 'suspicious' },
+                    { session }
+                );
+                await session.abortTransaction();
+                return res.status(400).json({ message: 'Payment amount or currency mismatch' });
+            }
+
+            // STEP 4: Mark as used ONLY after validation
+            await Payment.findByIdAndUpdate(
+                payment._id,
+                { used: true, usedAt: new Date() },
+                { session }
+            );
+
         }
 
         //  ENFORCE SUBMISSION LIMIT (ATOMIC)
         const userSubmissionCount = await Submission.countDocuments({
             contestId,
             userId,
-            status: { $ne: 'withdrawn' } // Exclude withdrawn
         });
         if (userSubmissionCount >= contest.maxSubmissionsPerUser) {
             return res.status(400).json({
@@ -87,18 +161,26 @@ router.post('/:id/submit', contestUpload, upload.single('media'), async (req, re
             });
         }
 
+        const existingSubmission = await Submission.findOne({
+            contestId,
+            userId
+        }).session(session);
 
+        if (existingSubmission) {
+            await session.abortTransaction();
+            return res.status(400).json({ message: 'Already submitted to this contest' });
+        }
 
         //  VALIDATE MEDIA TYPE
         const mediaType = getMediaType(req.file.mimetype);
         if (!contest.allowedMediaTypes.includes(mediaType)) {
+            const allowed = contest.allowedMediaTypes.join(' or ');
             return res.status(400).json({
-                message: `Only ${contest.allowedMediaTypes.join('/')} allowed`
+                message: `Only ${allowed} submissions are allowed for this contest`
             });
         }
-
         //  Upload to Cloud (Cloudinary, S3, etc.)
-        const cloudFile = await uploadToProvider(req.file);
+        cloudFile = await uploadToProvider(req.file);
 
         // Create FileMeta with cloud data
         const fileMeta = new FileMeta({
@@ -113,11 +195,9 @@ router.post('/:id/submit', contestUpload, upload.single('media'), async (req, re
             description: caption,
             isSubmission: true,
             contestId
-            // contestId is not needed — linked via Submission
         });
 
-        await fileMeta.save();
-
+        await fileMeta.save({ session });
         // Create Submission
         const submission = new Submission({
             userId,
@@ -128,7 +208,9 @@ router.post('/:id/submit', contestUpload, upload.single('media'), async (req, re
             status: 'pending'
         });
 
-        await submission.save();
+        await submission.save({ session });
+        await session.commitTransaction();
+        session.endSession();
 
         const safeFileResponse = {
             id: fileMeta._id,
@@ -154,15 +236,17 @@ router.post('/:id/submit', contestUpload, upload.single('media'), async (req, re
 
     } catch (error) {
         console.error('Submission error:', error);
-
-        // If file was uploaded to cloud but DB failed, we have an orphan.
-        // For production, consider a background job to clean orphans.
-        // For now, log and return error.
-
-        res.status(500).json({
-            message: 'Submission failed',
-            error: error.message
-        });
+        if (cloudFile?.publicId) {
+            try {
+                await deleteFromProvider(cloudFile.publicId);
+            } catch (cleanupErr) {
+                console.error('Cloud cleanup failed:', cleanupErr);
+            }
+        }
+        await session.abortTransaction();
+        return res.status(500).json({ message: 'Submission failed', error: error.message });
+    } finally {
+        session.endSession();
     }
 });
 
@@ -259,73 +343,106 @@ router.get('/:id/my-submission', async (req, res) => {
 });
 
 // Update caption
-router.patch('/submissions/:submissionId', async (req, res) => {
+router.patch('/submissions/:submissionId', auth, async (req, res) => {
+    const session = await mongoose.startSession();
+    session.startTransaction();
+
     try {
         const { submissionId } = req.params;
-        const userId = req.user?.id || req.headers['x-user-id'];
+        const userId = req.user.id;
         const { caption } = req.body;
 
-        if (!userId) {
-            return res.status(401).json({ message: 'User authentication required' });
+        if (!caption?.trim()) {
+            return res.status(400).json({ message: 'Caption cannot be empty' });
         }
 
-        const submission = await Submission.findOne({ _id: submissionId, userId });
+        // Fetch submission with contest
+        const submission = await Submission.findOne({ _id: submissionId, userId })
+            .populate('fileId')
+            .session(session);
+
         if (!submission) {
+            await session.abortTransaction();
             return res.status(404).json({ message: 'Submission not found' });
         }
 
-        const contest = await Contest.findById(submission.contestId);
-        if (!contest.isOpenForSubmissions) {
-            return res.status(400).json({ message: 'Cannot update after contest ended' });
+        const contest = await Contest.findById(submission.contestId).session(session);
+        if (!contest?.isOpenForSubmissions) {
+            await session.abortTransaction();
+            return res.status(400).json({ message: 'Edits closed for this contest' });
         }
 
-        if (caption !== undefined) {
-            submission.caption = caption;
-            await FileMeta.findByIdAndUpdate(submission.fileId, { description: caption });
-            await submission.save();
-        }
+        // Update both records atomically
+        await Promise.all([
+            FileMeta.findByIdAndUpdate(
+                submission.fileId,
+                { description: caption.trim() },
+                { session }
+            ),
+            Submission.findByIdAndUpdate(
+                submissionId,
+                { caption: caption.trim() },
+                { session }
+            )
+        ]);
 
-        res.json({ message: 'Updated successfully', submission });
+        await session.commitTransaction();
+        res.json({ message: 'Caption updated successfully' });
+
     } catch (error) {
-        console.error('Update error:', error);
-        res.status(500).json({ message: 'Server error', error: error.message });
+        await session.abortTransaction();
+        console.error('Caption update error:', error);
+        res.status(500).json({ message: 'Failed to update caption' });
+    } finally {
+        session.endSession();
     }
 });
 
 // Withdraw submission
-router.delete('/submissions/:submissionId', async (req, res) => {
+router.delete('/submissions/:submissionId', auth, async (req, res) => {
+    const session = await mongoose.startSession();
+    session.startTransaction();
+
     try {
         const { submissionId } = req.params;
-        const userId = req.user?.id;
+        const userId = req.user.id;
 
-        if (!userId) {
-            return res.status(401).json({ message: 'User authentication required' });
-        }
+        const submission = await Submission.findOne({ _id: submissionId, userId })
+            .populate('fileId')
+            .session(session);
 
-        const submission = await Submission.findOne({ _id: submissionId, userId }).populate('fileId');
         if (!submission) {
+            await session.abortTransaction();
             return res.status(404).json({ message: 'Submission not found' });
         }
 
-        const contest = await Contest.findById(submission.contestId);
-        if (!contest || !contest.isOpenForSubmissions) {
-            return res.status(400).json({ message: 'Cannot withdraw after contest ended' });
+        const contest = await Contest.findById(submission.contestId).session(session);
+        if (!contest?.isOpenForSubmissions) {
+            await session.abortTransaction();
+            return res.status(400).json({ message: 'Withdrawals closed for this contest' });
         }
 
-        //  Delete from Cloudinary (or other provider)
+        // Delete from Cloudinary
         if (submission.fileId?.cloudId) {
             await deleteFromProvider(submission.fileId.cloudId);
         }
 
-        // Delete DB records
-        await FileMeta.findByIdAndDelete(submission.fileId._id);
-        await submission.deleteOne();
+        // Delete both records
+        await Promise.all([
+            FileMeta.findByIdAndDelete(submission.fileId._id, { session }),
+            submission.deleteOne({ session })
+        ]);
 
-        res.json({ success: true, message: 'Submission withdrawn successfully' });
+        await session.commitTransaction();
+        res.json({ success: true, message: 'Submission withdrawn' });
 
     } catch (error) {
-        console.error('Withdraw error:', error);
-        res.status(500).json({ message: 'Server error', error: error.message });
+        // Optional: attempt to re-upload if rollback needed (not typical for delete)
+        await session.abortTransaction();
+        console.error('Withdrawal error:', error);
+        res.status(500).json({ message: 'Failed to withdraw submission' });
+    } finally {
+        session.endSession();
     }
 });
 

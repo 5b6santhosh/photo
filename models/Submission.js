@@ -55,8 +55,6 @@ const submissionSchema = new mongoose.Schema({
     default: Date.now
   }
 });
-// 1 submission per user per contest
-submissionSchema.index({ userId: 1, contestId: 1 }, { unique: true });
 submissionSchema.index({ contestId: 1, userId: 1 }); // Fast: "Get my submissions for contest X"
 submissionSchema.index({ fileId: 1 }); // Fast: "Find submission by file"
 
