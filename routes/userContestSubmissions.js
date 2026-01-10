@@ -1,17 +1,19 @@
-// routes/contestSubmissions.js
+// routes/contestSubmissions.js - FIXED VERSION
 const express = require('express');
 const router = express.Router();
 const multer = require('multer');
 const fs = require('fs');
 const mongoose = require('mongoose');
+const auth = require('../middleware/auth'); // FIXED: Added auth import
 const contestUpload = require('../middleware/contestUpload');
 const Contest = require('../models/Contest');
 const FileMeta = require('../models/FileMeta');
 const Submission = require('../models/Submission');
 const ContestEntry = require('../models/ContestEntry');
+const Payment = require('../models/Payment');
 const { uploadToProvider, deleteFromProvider } = require('../services/storageService');
 
-//  Use temp storage for cloud upload
+// Use temp storage for cloud upload
 const TEMP_UPLOAD_DIR = 'temp';
 if (!fs.existsSync(TEMP_UPLOAD_DIR)) {
     fs.mkdirSync(TEMP_UPLOAD_DIR, { recursive: true });
@@ -21,7 +23,6 @@ const upload = multer({
     dest: TEMP_UPLOAD_DIR,
     limits: { fileSize: 100 * 1024 * 1024 }, // 100MB hard limit
     fileFilter: (req, file, cb) => {
-        // Basic filter — detailed validation happens in middleware
         const allowedTypes = [
             'image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp',
             'video/mp4', 'video/mpeg', 'video/ogg', 'video/webm', 'video/quicktime'
@@ -40,7 +41,6 @@ const getMediaType = (mimeType) => {
     return 'unknown';
 };
 
-// Helper to build response (not needed for cloud — URL comes from service)
 const buildFileResponse = (fileMeta) => {
     return {
         id: fileMeta._id,
@@ -48,25 +48,32 @@ const buildFileResponse = (fileMeta) => {
         originalName: fileMeta.originalName,
         mimeType: fileMeta.mimeType,
         size: fileMeta.size,
-        mediaUrl: fileMeta.path, //  This is the Cloudinary URL
+        mediaUrl: fileMeta.path,
         thumbnailUrl: fileMeta.mimeType.startsWith('image/')
             ? fileMeta.path
-            : null // For video, you may want a separate thumbnail later
+            : fileMeta.thumbnailUrl || null
     };
 };
 
-// Submit to contest
-router.post('/:id/submit', contestUpload, upload.single('media'), async (req, res) => {
-    const session = await mongoose.startSession();
-    session.startTransaction();
+/**
+ * POST /:id/submit
+ * Submit media to contest (with payment verification for paid contests)
+ */
+router.post('/:id/submit', auth, contestUpload, upload.single('media'), async (req, res) => {
+    let session;
     let cloudFile;
+    let tempFilePath = req.file?.path;
 
     try {
         const { id: contestId } = req.params;
         const userId = req.user.id;
         const { caption } = req.body;
 
+        // ─────────────────────────────────────────────
+        // VALIDATION
+        // ─────────────────────────────────────────────
         if (!mongoose.Types.ObjectId.isValid(contestId)) {
+            if (tempFilePath) fs.unlinkSync(tempFilePath);
             return res.status(400).json({ message: 'Invalid contest ID' });
         }
 
@@ -76,33 +83,65 @@ router.post('/:id/submit', contestUpload, upload.single('media'), async (req, re
             });
         }
 
+        // Start transaction
+        session = await mongoose.startSession();
+        session.startTransaction();
+
         // ─────────────────────────────────────────────
         // VALIDATE CONTEST
         // ─────────────────────────────────────────────
         const contest = await Contest.findById(contestId).session(session);
         if (!contest) {
-            return res.status(404).json({ message: 'Contest not found' });
+            throw new Error('Contest not found');
         }
 
         if (!contest.isOpenForSubmissions) {
-            return res.status(400).json({
-                message: `Submissions are closed for "${contest.title}"`
-            });
+            throw new Error(`Submissions are closed for "${contest.title}"`);
         }
 
         // ─────────────────────────────────────────────
-        //  PAID CONTEST ENTRY CHECK (ContestEntry based)
+        // CHECK FOR EXISTING SUBMISSION (Race condition protection)
+        // ─────────────────────────────────────────────
+        const existingSubmission = await Submission.findOne({
+            contestId,
+            userId
+        }).session(session);
+
+        if (existingSubmission) {
+            throw new Error('You have already submitted to this contest');
+        }
+
+        // ─────────────────────────────────────────────
+        // PAID CONTEST: Verify Payment & ContestEntry
         // ─────────────────────────────────────────────
         let contestEntry = null;
 
         if (contest.entryFee > 0) {
-            contestEntry = await ContestEntry.findOneAndUpdate(
-                { contestId, userId, status: 'paid' },
-                { $set: { status: 'submitted', submittedAt: new Date() } },
-                { session, new: true }
-            );
+            // Check for verified payment
+            const verifiedPayment = await Payment.findOne({
+                userId,
+                contestId,
+                status: 'verified'
+            }).session(session);
+
+            if (!verifiedPayment) {
+                throw new Error('No verified payment found. Please complete payment first.');
+            }
+
+            // Get contest entry (should exist from webhook)
+            contestEntry = await ContestEntry.findOne({
+                contestId,
+                userId,
+                status: 'paid'
+            }).session(session);
+
             if (!contestEntry) {
-                throw new Error('No valid paid entry found or already submitted.');
+                throw new Error('No valid contest entry found. Please contact support.');
+            }
+
+            // Check if already submitted via contestEntry status
+            if (contestEntry.status === 'submitted') {
+                throw new Error('You have already submitted to this contest');
             }
         }
 
@@ -112,25 +151,10 @@ router.post('/:id/submit', contestUpload, upload.single('media'), async (req, re
         const userSubmissionCount = await Submission.countDocuments({
             contestId,
             userId
-        });
-
-        if (userSubmissionCount >= contest.maxSubmissionsPerUser) {
-            await session.abortTransaction();
-            return res.status(400).json({
-                message: `Max ${contest.maxSubmissionsPerUser} submission(s) allowed`
-            });
-        }
-
-        const existingSubmission = await Submission.findOne({
-            contestId,
-            userId
         }).session(session);
 
-        if (existingSubmission) {
-            await session.abortTransaction();
-            return res.status(400).json({
-                message: 'Already submitted to this contest'
-            });
+        if (userSubmissionCount >= contest.maxSubmissionsPerUser) {
+            throw new Error(`Maximum ${contest.maxSubmissionsPerUser} submission(s) allowed per user`);
         }
 
         // ─────────────────────────────────────────────
@@ -139,14 +163,11 @@ router.post('/:id/submit', contestUpload, upload.single('media'), async (req, re
         const mediaType = getMediaType(req.file.mimetype);
         if (!contest.allowedMediaTypes.includes(mediaType)) {
             const allowed = contest.allowedMediaTypes.join(' or ');
-            await session.abortTransaction();
-            return res.status(400).json({
-                message: `Only ${allowed} submissions are allowed for this contest`
-            });
+            throw new Error(`Only ${allowed} submissions are allowed for this contest`);
         }
 
         // ─────────────────────────────────────────────
-        // UPLOAD TO CLOUD
+        // UPLOAD TO CLOUD STORAGE
         // ─────────────────────────────────────────────
         cloudFile = await uploadToProvider(req.file);
 
@@ -159,7 +180,7 @@ router.post('/:id/submit', contestUpload, upload.single('media'), async (req, re
             cloudId: cloudFile.publicId,
             thumbnailUrl: cloudFile.thumbnailUrl,
             createdBy: userId,
-            description: caption,
+            description: caption || '',
             isSubmission: true,
             contestId
         });
@@ -172,18 +193,19 @@ router.post('/:id/submit', contestUpload, upload.single('media'), async (req, re
         const submission = new Submission({
             userId,
             contestId,
-            contestEntryId: contestEntry._id,
+            contestEntryId: contestEntry?._id || null, // FIXED: Handle free contests
             fileId: fileMeta._id,
             mediaType,
-            caption,
+            caption: caption || '',
             status: 'pending'
         });
 
         await submission.save({ session });
 
         // ─────────────────────────────────────────────
-        // MARK CONTEST ENTRY AS SUBMITTED
+        // UPDATE CONTEST ENTRY (only for paid contests)
         // ─────────────────────────────────────────────
+        // FIXED: Single update, not double
         if (contestEntry) {
             await ContestEntry.findByIdAndUpdate(
                 contestEntry._id,
@@ -195,8 +217,24 @@ router.post('/:id/submit', contestUpload, upload.single('media'), async (req, re
             );
         }
 
+        // ─────────────────────────────────────────────
+        // UPDATE CONTEST STATS
+        // ─────────────────────────────────────────────
+        await Contest.findByIdAndUpdate(
+            contestId,
+            {
+                $inc: { submissionCount: 1 }
+            },
+            { session }
+        );
+
+        // Commit transaction
         await session.commitTransaction();
-        session.endSession();
+
+        // Clean up temp file
+        if (tempFilePath && fs.existsSync(tempFilePath)) {
+            fs.unlinkSync(tempFilePath);
+        }
 
         res.status(201).json({
             success: true,
@@ -207,7 +245,7 @@ router.post('/:id/submit', contestUpload, upload.single('media'), async (req, re
                 mediaType: submission.mediaType,
                 caption: submission.caption,
                 status: submission.status,
-                submittedAt: submission.submittedAt,
+                submittedAt: submission.createdAt,
                 file: {
                     id: fileMeta._id,
                     mimeType: fileMeta.mimeType,
@@ -220,33 +258,55 @@ router.post('/:id/submit', contestUpload, upload.single('media'), async (req, re
     } catch (error) {
         console.error('Submission error:', error);
 
+        // Rollback transaction
+        if (session) {
+            await session.abortTransaction();
+        }
+
+        // Clean up uploaded cloud file
         if (cloudFile?.publicId) {
             try {
                 await deleteFromProvider(cloudFile.publicId);
+                console.log('Cloud file cleanup successful');
             } catch (cleanupErr) {
                 console.error('Cloud cleanup failed:', cleanupErr);
             }
         }
 
-        await session.abortTransaction();
-        return res.status(500).json({
-            message: 'Submission failed',
-            error: error.message
+        // Clean up temp file
+        if (tempFilePath && fs.existsSync(tempFilePath)) {
+            fs.unlinkSync(tempFilePath);
+        }
+
+        return res.status(400).json({
+            message: error.message || 'Submission failed'
         });
 
     } finally {
-        session.endSession();
+        if (session) {
+            session.endSession();
+        }
     }
 });
 
-// Get contest submissions
+/**
+ * GET /:id/submissions
+ * Get all submissions for a contest
+ */
 router.get('/:id/submissions', async (req, res) => {
     try {
         const contestId = req.params.id;
-        const userId = req.user?.id || req.headers['x-user-id'];
+        const userId = req.user?.id;
         const { status } = req.query;
 
-        const contest = await Contest.findById(contestId).populate('createdBy', 'username email');
+        if (!mongoose.Types.ObjectId.isValid(contestId)) {
+            return res.status(400).json({ message: 'Invalid contest ID' });
+        }
+
+        const contest = await Contest.findById(contestId)
+            .populate('createdBy', 'username email')
+            .select('-__v');
+
         if (!contest) {
             return res.status(404).json({ message: 'Contest not found' });
         }
@@ -257,13 +317,17 @@ router.get('/:id/submissions', async (req, res) => {
         const submissions = await Submission.find(submissionsQuery)
             .populate('userId', 'username email')
             .populate('fileId')
-            .sort({ submittedAt: -1 });
+            .sort({ createdAt: -1 });
 
         const submissionCount = submissions.length;
 
         let userSubmission = null;
+        let userHasSubmitted = false;
+
         if (userId) {
-            userSubmission = await Submission.findOne({ contestId, userId }).populate('fileId');
+            userSubmission = await Submission.findOne({ contestId, userId })
+                .populate('fileId');
+            userHasSubmitted = !!userSubmission;
         }
 
         res.json({
@@ -278,19 +342,29 @@ router.get('/:id/submissions', async (req, res) => {
                 submissionCount,
                 maxSubmissionsPerUser: contest.maxSubmissionsPerUser,
                 allowedMediaTypes: contest.allowedMediaTypes,
-                maxFileSize: contest.maxFileSize
+                maxFileSize: contest.maxFileSize,
+                entryFee: contest.entryFee
             },
             submissions: submissions.map(sub => ({
-                ...sub.toObject(),
+                id: sub._id,
+                userId: sub.userId,
+                contestId: sub.contestId,
+                mediaType: sub.mediaType,
+                caption: sub.caption,
+                status: sub.status,
+                submittedAt: sub.createdAt,
                 file: sub.fileId ? buildFileResponse(sub.fileId) : null
             })),
-            userHasSubmitted: !!userSubmission,
-            userSubmission: userSubmission
-                ? {
-                    ...userSubmission.toObject(),
-                    file: userSubmission.fileId ? buildFileResponse(userSubmission.fileId) : null
-                }
-                : null
+            userHasSubmitted,
+            userSubmission: userSubmission ? {
+                id: userSubmission._id,
+                contestId: userSubmission.contestId,
+                mediaType: userSubmission.mediaType,
+                caption: userSubmission.caption,
+                status: userSubmission.status,
+                submittedAt: userSubmission.createdAt,
+                file: userSubmission.fileId ? buildFileResponse(userSubmission.fileId) : null
+            } : null
         });
 
     } catch (error) {
@@ -299,28 +373,39 @@ router.get('/:id/submissions', async (req, res) => {
     }
 });
 
-// Get user's submission
-router.get('/:id/my-submission', async (req, res) => {
+/**
+ * GET /:id/my-submission
+ * Get current user's submission for a contest
+ */
+router.get('/:id/my-submission', auth, async (req, res) => {
     try {
         const contestId = req.params.id;
-        const userId = req.user?.id || req.headers['x-user-id'];
+        const userId = req.user.id;
 
-        if (!userId) {
-            return res.status(401).json({ message: 'User authentication required' });
+        if (!mongoose.Types.ObjectId.isValid(contestId)) {
+            return res.status(400).json({ message: 'Invalid contest ID' });
         }
 
         const submission = await Submission.findOne({ contestId, userId })
             .populate('fileId')
-            .populate('contestId', 'title description');
+            .populate('contestId', 'title description entryFee');
 
         if (!submission) {
-            return res.status(404).json({ message: 'No submission found', hasSubmitted: false });
+            return res.status(404).json({
+                message: 'No submission found',
+                hasSubmitted: false
+            });
         }
 
         res.json({
             hasSubmitted: true,
             submission: {
-                ...submission.toObject(),
+                id: submission._id,
+                contestId: submission.contestId,
+                mediaType: submission.mediaType,
+                caption: submission.caption,
+                status: submission.status,
+                submittedAt: submission.createdAt,
                 file: submission.fileId ? buildFileResponse(submission.fileId) : null
             }
         });
@@ -331,37 +416,45 @@ router.get('/:id/my-submission', async (req, res) => {
     }
 });
 
-// Update caption
-router.patch('/submissions/:submissionId', auth, async (req, res) => {
-    const session = await mongoose.startSession();
-    session.startTransaction();
+/**
+ * PATCH /submissions/:submissionId
+ * Update submission caption
+ */
+router.patch('/submissions/:submissionId', auth, async (req, res) => { // FIXED: Added auth
+    let session;
 
     try {
         const { submissionId } = req.params;
         const userId = req.user.id;
         const { caption } = req.body;
 
+        if (!mongoose.Types.ObjectId.isValid(submissionId)) {
+            return res.status(400).json({ message: 'Invalid submission ID' });
+        }
+
         if (!caption?.trim()) {
             return res.status(400).json({ message: 'Caption cannot be empty' });
         }
 
-        // Fetch submission with contest
+        session = await mongoose.startSession();
+        session.startTransaction();
+
+        // Fetch submission with ownership check
         const submission = await Submission.findOne({ _id: submissionId, userId })
             .populate('fileId')
             .session(session);
 
         if (!submission) {
-            await session.abortTransaction();
-            return res.status(404).json({ message: 'Submission not found' });
+            throw new Error('Submission not found or you do not have permission');
         }
 
+        // Check if contest still allows edits
         const contest = await Contest.findById(submission.contestId).session(session);
         if (!contest?.isOpenForSubmissions) {
-            await session.abortTransaction();
-            return res.status(400).json({ message: 'Edits closed for this contest' });
+            throw new Error('Edits are closed for this contest');
         }
 
-        // Update both records atomically
+        // Update both FileMeta and Submission atomically
         await Promise.all([
             FileMeta.findByIdAndUpdate(
                 submission.fileId,
@@ -376,62 +469,109 @@ router.patch('/submissions/:submissionId', auth, async (req, res) => {
         ]);
 
         await session.commitTransaction();
-        res.json({ message: 'Caption updated successfully' });
+
+        res.json({
+            success: true,
+            message: 'Caption updated successfully'
+        });
 
     } catch (error) {
-        await session.abortTransaction();
+        if (session) {
+            await session.abortTransaction();
+        }
         console.error('Caption update error:', error);
-        res.status(500).json({ message: 'Failed to update caption' });
+        res.status(400).json({
+            message: error.message || 'Failed to update caption'
+        });
     } finally {
-        session.endSession();
+        if (session) {
+            session.endSession();
+        }
     }
 });
 
-// Withdraw submission
-router.delete('/submissions/:submissionId', auth, async (req, res) => {
-    const session = await mongoose.startSession();
-    session.startTransaction();
+/**
+ * DELETE /submissions/:submissionId
+ * Withdraw submission (deletes file and submission record)
+ */
+router.delete('/submissions/:submissionId', auth, async (req, res) => { // FIXED: Added auth
+    let session;
 
     try {
         const { submissionId } = req.params;
         const userId = req.user.id;
+
+        if (!mongoose.Types.ObjectId.isValid(submissionId)) {
+            return res.status(400).json({ message: 'Invalid submission ID' });
+        }
+
+        session = await mongoose.startSession();
+        session.startTransaction();
 
         const submission = await Submission.findOne({ _id: submissionId, userId })
             .populate('fileId')
             .session(session);
 
         if (!submission) {
-            await session.abortTransaction();
-            return res.status(404).json({ message: 'Submission not found' });
+            throw new Error('Submission not found or you do not have permission');
         }
 
         const contest = await Contest.findById(submission.contestId).session(session);
         if (!contest?.isOpenForSubmissions) {
-            await session.abortTransaction();
-            return res.status(400).json({ message: 'Withdrawals closed for this contest' });
+            throw new Error('Withdrawals are closed for this contest');
         }
 
-        // Delete from Cloudinary
+        // Delete from cloud storage
         if (submission.fileId?.cloudId) {
             await deleteFromProvider(submission.fileId.cloudId);
         }
 
-        // Delete both records
+        // Revert ContestEntry status (if paid contest)
+        if (submission.contestEntryId) {
+            await ContestEntry.findByIdAndUpdate(
+                submission.contestEntryId,
+                {
+                    status: 'paid',
+                    submittedAt: null
+                },
+                { session }
+            );
+        }
+
+        // Delete database records
         await Promise.all([
             FileMeta.findByIdAndDelete(submission.fileId._id, { session }),
-            submission.deleteOne({ session })
+            Submission.findByIdAndDelete(submissionId, { session })
         ]);
 
+        // Update contest stats
+        await Contest.findByIdAndUpdate(
+            contest._id,
+            {
+                $inc: { submissionCount: -1 }
+            },
+            { session }
+        );
+
         await session.commitTransaction();
-        res.json({ success: true, message: 'Submission withdrawn' });
+
+        res.json({
+            success: true,
+            message: 'Submission withdrawn successfully'
+        });
 
     } catch (error) {
-        // Optional: attempt to re-upload if rollback needed (not typical for delete)
-        await session.abortTransaction();
+        if (session) {
+            await session.abortTransaction();
+        }
         console.error('Withdrawal error:', error);
-        res.status(500).json({ message: 'Failed to withdraw submission' });
+        res.status(400).json({
+            message: error.message || 'Failed to withdraw submission'
+        });
     } finally {
-        session.endSession();
+        if (session) {
+            session.endSession();
+        }
     }
 });
 

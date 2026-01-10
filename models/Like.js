@@ -1,3 +1,4 @@
+const mongoose = require('mongoose');
 const LikeSchema = new mongoose.Schema(
     {
         fileId: { type: mongoose.Schema.Types.ObjectId, ref: 'FileMeta', required: true },

@@ -1,6 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
+const redis = require('./services/redis');
 const cors = require('cors');
 const path = require('path');
 
@@ -35,7 +36,6 @@ app.use('/api/shares', require('./routes/shares'));
 app.use('/api/reports', require('./routes/reports'));
 app.use('/api/profile', require('./routes/profile'));
 app.use('/api/payments', require('./routes/payments'));
-
 
 
 // Static files
