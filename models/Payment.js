@@ -1,26 +1,88 @@
-// models/Payment.js
 const mongoose = require('mongoose');
 
 const paymentSchema = new mongoose.Schema({
-    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-    contestId: { type: mongoose.Schema.Types.ObjectId, ref: 'Contest', required: true },
-    orderId: { type: String, required: true, unique: true },
-    paymentId: { type: String, required: true, unique: true }, // FIXED: Unique payment ID
-    amount: { type: Number, required: true }, // in paise
-    currency: { type: String, required: true },
-    fxVersion: { type: String }, // optional for audits
+    userId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User',
+        required: true,
+        index: true
+    },
+    contestId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Contest',
+        required: true,
+        index: true
+    },
+    orderId: {
+        type: String,
+        required: true,
+        unique: true,
+        index: true
+    },
+    paymentId: {
+        type: String,
+        sparse: true,
+        unique: true,
+        index: true
+    },
+    amount: {
+        type: Number,
+        required: true,
+        min: 0
+    },
+    currency: {
+        type: String,
+        required: true,
+        uppercase: true
+    },
     status: {
         type: String,
         enum: ['pending', 'verified', 'failed', 'refunded', 'suspicious'],
-        default: 'pending'
+        default: 'pending',
+        index: true
     },
-    used: { type: Boolean, default: false }, //  Critical for idempotency
-    usedAt: Date
+    used: {
+        type: Boolean,
+        default: false
+    },
+    usedAt: {
+        type: Date
+    },
+    verifiedAt: {
+        type: Date
+    },
+    failedAt: {
+        type: Date
+    },
+    refundedAt: {
+        type: Date
+    },
+    refundId: {
+        type: String
+    },
+    refundAmount: {
+        type: Number
+    },
+    // Additional metadata
+    metadata: {
+        countryCode: String,
+        fxRate: Number,
+        originalINR: Number
+    },
+    razorpayData: {
+        method: String,
+        email: String,
+        contact: String
+    },
+    suspiciousReason: String,
+    webhookData: mongoose.Schema.Types.Mixed,
+    error: String
 
 }, { timestamps: true });
-// FIXED: Better indexing strategy
-paymentSchema.index({ orderId: 1 }); // Helps webhook & debugging
-paymentSchema.index({ userId: 1, contestId: 1 }); // Find user's payments for contest
-paymentSchema.index({ paymentId: 1 }, { unique: true }); // Prevent duplicate payment IDs
-paymentSchema.index({ userId: 1, contestId: 1, used: 1 }); // Query optimization
+
+// Compound indexes for efficient queries
+paymentSchema.index({ userId: 1, contestId: 1, status: 1 }, { unique: true, partialFilterExpression: { status: 'verified' } });
+paymentSchema.index({ userId: 1, status: 1 });
+paymentSchema.index({ contestId: 1, status: 1 });
+
 module.exports = mongoose.model('Payment', paymentSchema);

@@ -8,6 +8,7 @@ const Contest = require('../models/Contest');
 const { getFxRate } = require('../services/fxService');
 const { getRegion } = require('../config/currencyMap');
 const User = require('../models/User');
+const ContestEntry = require('../models/ContestEntry');
 
 const router = express.Router();
 
@@ -33,6 +34,40 @@ router.post('/create-order', auth, async (req, res) => {
             return res.status(400).json({ message: 'This contest is free' });
         }
 
+        const existingPayment = await Payment.findOne({
+            userId: req.user.id,
+            contestId,
+            status: { $in: ['pending', 'verified'] }
+        });
+
+        if (existingPayment) {
+            return res.status(400).json({
+                message: existingPayment.status === 'verified'
+                    ? 'You have already paid for this contest'
+                    : 'You already have a pending payment for this contest. Please wait.',
+                existingPaymentId: existingPayment.paymentId,
+                status: existingPayment.status
+            });
+        }
+        const ZERO_DECIMAL_CURRENCIES = new Set([
+            'BIF', // Burundian Franc
+            'CLP', // Chilean Peso  
+            'DJF', // Djiboutian Franc
+            'GNF', // Guinean Franc
+            'JPY', // Japanese Yen
+            'KMF', // Comorian Franc
+            'KRW', // South Korean Won
+            'MGA', // Malagasy Ariary
+            'PYG', // Paraguayan Guarani
+            'RWF', // Rwandan Franc
+            'UGX', // Ugandan Shilling
+            'VND', // Vietnamese Dong
+            'VUV', // Vanuatu Vatu
+            'XAF', // Central African CFA Franc
+            'XOF', // West African CFA Franc
+            'XPF'  // CFP Franc
+        ]);
+
         const region = getRegion(countryCode);
         const { currency, multiplier } = region;
 
@@ -45,11 +80,31 @@ router.post('/create-order', auth, async (req, res) => {
         } else {
             try {
                 fxRate = await getFxRate(currency);
-            } catch {
-                return res.status(503).json({ message: 'Currency conversion unavailable' });
+                if (!fxRate || fxRate <= 0) {
+                    throw new Error('Invalid FX rate');
+                }
+            } catch (err) {
+                console.error('FX rate fetch error:', err);
+                return res.status(503).json({
+                    message: 'Currency conversion service unavailable. Please try again.'
+                });
             }
-            finalAmount = Math.ceil(baseInINR * fxRate * multiplier * 100);
+
+            // finalAmount = Math.ceil(baseInINR * fxRate * multiplier * 100);
+            // Convert INR to target currency
+            const amountInTargetCurrency = baseInINR * fxRate * multiplier;
+            if (ZERO_DECIMAL_CURRENCIES.has(currency)) {
+                finalAmount = Math.ceil(amountInTargetCurrency);
+            } else {
+                finalAmount = Math.ceil(amountInTargetCurrency * 100);
+            }
+
         }
+
+        if (finalAmount <= 0 || finalAmount > 1000000000) { // 10 crore paise max
+            return res.status(400).json({ message: 'Invalid payment amount calculated' });
+        }
+
 
         const order = await razorpay.orders.create({
             amount: finalAmount,
@@ -61,15 +116,35 @@ router.post('/create-order', auth, async (req, res) => {
                 originalINR: baseInINR,
                 expectedAmount: finalAmount,
                 currency,
-                countryCode
+                countryCode,
+                fxRate: fxRate || 1,
+                createdAt: new Date().toISOString()
+
             }
         });
+
+        await Payment.create({
+            userId: req.user.id,
+            contestId,
+            orderId: order.id,
+            amount: finalAmount,
+            currency,
+            status: 'pending',
+            used: false,
+            metadata: {
+                countryCode,
+                fxRate: fxRate || 1,
+                originalINR: baseInINR
+            }
+        });
+
 
         res.json({
             orderId: order.id,
             amount: finalAmount,
             currency,
-            key: process.env.RAZORPAY_KEY_ID
+            key: process.env.RAZORPAY_KEY_ID,
+            contestId: contestId.toString()
         });
 
     } catch (err) {
@@ -113,16 +188,36 @@ router.post('/verify', auth, async (req, res) => {
         .update(body)
         .digest('hex');
 
-    if (expectedSignature !== razorpay_signature) {
-        return res.status(400).json({ verified: false });
+    const isValidSignature = crypto.timingSafeEqual(
+        Buffer.from(expectedSignature),
+        Buffer.from(razorpay_signature)
+    );
+
+    if (!isValidSignature) {
+        console.warn(`Invalid signature for payment ${razorpay_payment_id}`);
+        return res.status(400).json({
+            verified: false,
+            message: 'Payment signature verification failed'
+        });
     }
 
     try {
         const order = await razorpay.orders.fetch(razorpay_order_id);
 
-        if (order.notes.contestId !== contestId || order.notes?.userId !== userId
-        ) {
-            return res.status(400).json({ verified: false, message: 'Order mismatch' });
+        if (order.notes?.contestId !== contestId.toString()) {
+            console.warn(`Contest mismatch: expected ${contestId}, got ${order.notes?.contestId}`);
+            return res.status(400).json({
+                verified: false,
+                message: 'Order does not match contest'
+            });
+        }
+
+        if (order.notes?.userId !== userId.toString()) {
+            console.warn(`User mismatch: expected ${userId}, got ${order.notes?.userId}`);
+            return res.status(400).json({
+                verified: false,
+                message: 'Order does not belong to this user'
+            });
         }
 
         const contest = await Contest.findById(contestId);
@@ -130,64 +225,122 @@ router.post('/verify', auth, async (req, res) => {
             return res.status(400).json({ verified: false });
         }
 
-        const existingEntry = await Payment.findOne({
-            userId: req.user.id,
-            contestId,
-            status: 'verified'
-        });
-        if (existingEntry) {
-            return res.status(400).json({ message: 'You already paid for this contest' });
+        // ─────────────────────────────────────────────
+        // 4. Update Payment Record with paymentId
+        // ─────────────────────────────────────────────
+        // Note: We do NOT set status to 'verified' here
+        // The webhook will handle actual verification and contest entry creation
+
+        const payment = await Payment.findOneAndUpdate(
+            {
+                orderId: razorpay_order_id,
+                userId,
+                contestId
+            },
+            {
+                $set: {
+                    paymentId: razorpay_payment_id,
+                    // Status remains 'pending' until webhook confirms
+                    updatedAt: new Date()
+                }
+            },
+            { new: true }
+        );
+
+        if (!payment) {
+            console.warn(`Payment record not found for order ${razorpay_order_id}`);
+            return res.status(404).json({
+                verified: false,
+                message: 'Payment record not found'
+            });
         }
 
-        const expectedAmount = order.notes?.expectedAmount;
-        const expectedCurrency = order.notes?.currency;
+        // ─────────────────────────────────────────────
+        // 5. Return Success Response
+        // ─────────────────────────────────────────────
+        // Frontend can now show "processing" state
+        // Webhook will complete the verification and create contest entry
 
-        if (
-            order.amount !== expectedAmount ||
-            order.currency !== expectedCurrency
-        ) {
-            return res.status(400).json({ verified: false, message: 'Order amount mismatch' });
-        }
-
-        const payment = await Payment.create({
-            userId,
-            contestId,
-            orderId: razorpay_order_id,
+        res.json({
+            verified: true,
             paymentId: razorpay_payment_id,
-            amount: order.amount,
-            currency: order.currency,
-            status: 'verified',
-            used: false
+            orderId: razorpay_order_id,
+            message: 'Payment received. Verification in progress...',
+            status: 'processing'
         });
-
-        await Promise.all([
-            User.updateOne(
-                { _id: userId },
-                {
-                    $addToSet: {
-                        payments: payment._id,
-                        contestsJoined: contestId
-                    }
-                }
-            ),
-            Contest.updateOne(
-                { _id: contestId },
-                {
-                    $addToSet: {
-                        payments: payment._id,
-                        participants: userId
-                    }
-                }
-            )
-        ]);
-
-        res.json({ verified: true, paymentId: payment.paymentId, message: 'Payment confirmed successfully' });
 
     } catch (err) {
         console.error(err);
         res.status(500).json({ verified: false });
     }
 });
+
+/**
+ * GET /api/payments/status/:paymentId
+ * Check payment verification status (for polling after payment)
+ */
+router.get('/status/:paymentId', auth, async (req, res) => {
+    try {
+        const { paymentId } = req.params;
+
+        const payment = await Payment.findOne({
+            paymentId,
+            userId: req.user.id
+        }).select('status contestId paymentId amount currency verifiedAt');
+
+        if (!payment) {
+            return res.status(404).json({ message: 'Payment not found' });
+        }
+
+        // Check if contest entry exists
+        let contestEntry = null;
+        if (payment.status === 'verified') {
+            contestEntry = await ContestEntry.findOne({
+                paymentId: payment._id,
+                userId: req.user.id
+            }).select('status createdAt');
+        }
+
+        res.json({
+            status: payment.status,
+            contestId: payment.contestId,
+            paymentId: payment.paymentId,
+            amount: payment.amount,
+            currency: payment.currency,
+            verifiedAt: payment.verifiedAt,
+            contestEntry: contestEntry ? {
+                status: contestEntry.status,
+                createdAt: contestEntry.createdAt
+            } : null
+        });
+
+    } catch (err) {
+        console.error('Payment status check error:', err);
+        res.status(500).json({ message: 'Failed to check payment status' });
+    }
+});
+
+
+/**
+ * GET /api/payments/my-payments
+ * Get user's payment history
+ */
+router.get('/my-payments', auth, async (req, res) => {
+    try {
+        const payments = await Payment.find({ userId: req.user.id })
+            .populate('contestId', 'title entryFee')
+            .sort({ createdAt: -1 })
+            .limit(50)
+            .select('-__v');
+
+        res.json({ payments });
+
+    } catch (err) {
+        console.error('Fetch payments error:', err);
+        res.status(500).json({ message: 'Failed to fetch payment history' });
+    }
+});
+
 
 
 module.exports = router;
