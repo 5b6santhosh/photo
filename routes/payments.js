@@ -341,6 +341,50 @@ router.get('/my-payments', auth, async (req, res) => {
     }
 });
 
+/**
+ * GET /api/payments/status-by-contest/:contestId
+ * Get payment status for a user in a specific contest
+ */
+router.get('/status-by-contest/:contestId', auth, async (req, res) => {
+    try {
+        const { contestId } = req.params;
+        const userId = req.user.id;
 
+        const payment = await Payment.findOne({
+            contestId,
+            userId
+        }).select('status contestId paymentId amount currency verifiedAt');
+
+        if (!payment) {
+            return res.status(404).json({ message: 'No payment found for this contest' });
+        }
+
+        let contestEntry = null;
+        if (payment.status === 'verified') {
+            contestEntry = await ContestEntry.findOne({
+                paymentId: payment._id,
+                userId
+            }).select('status createdAt');
+        }
+
+        res.json({
+            status: payment.status,
+            contestId: payment.contestId,
+            paymentId: payment.paymentId,
+            amount: payment.amount,
+            currency: payment.currency,
+            verifiedAt: payment.verifiedAt,
+            contestEntry: contestEntry
+                ? {
+                    status: contestEntry.status,
+                    createdAt: contestEntry.createdAt
+                }
+                : null
+        });
+    } catch (err) {
+        console.error('Payment status by contest error:', err);
+        res.status(500).json({ message: 'Failed to fetch payment status' });
+    }
+});
 
 module.exports = router;
