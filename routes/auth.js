@@ -70,13 +70,14 @@ router.post('/signup', async (req, res) => {
 
     await tempUser.save();
 
-    // 7️⃣ Send OTP email (PLAIN OTP ONLY)
+    // Send OTP email (PLAIN OTP ONLY)
     await mailService.sendMail({
       to: email,
       subject: "Your OTP",
       text: `Your OTP is ${plainOTP}`,
       html: `<h3>Your OTP: ${plainOTP}</h3>`,
     });
+
 
     res.status(201).json({
       status: true,
