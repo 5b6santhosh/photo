@@ -84,4 +84,43 @@ router.post('/', upload.single('file'), async (req, res) => {
   }
 });
 
+// POST /api/uploads/image
+router.post('/image', upload.single('file'), async (req, res) => {
+  let tempFilePath = null;
+
+  try {
+    if (!req.file) {
+      return res.status(400).json({ message: 'No file uploaded' });
+    }
+
+    tempFilePath = req.file.path;
+
+    const allowedTypes = ['image/png', 'image/jpeg', 'image/jpg', 'image/webp'];
+    if (!allowedTypes.includes(req.file.mimetype)) {
+      if (fs.existsSync(tempFilePath)) fs.unlinkSync(tempFilePath);
+      return res.status(400).json({ message: 'Invalid file type. Only images are allowed.' });
+    }
+
+    const cloudFile = await uploadToProvider(req.file);
+
+    res.status(201).json({
+      success: true,
+      message: 'Image uploaded successfully',
+      data: {
+        url: cloudFile.url,
+        publicId: cloudFile.publicId,
+        mimeType: req.file.mimetype,
+        size: req.file.size
+      }
+    });
+
+  } catch (error) {
+    console.error('Common Upload Error:', error);
+    if (tempFilePath && fs.existsSync(tempFilePath)) {
+      try { fs.unlinkSync(tempFilePath); } catch (e) { }
+    }
+    res.status(500).json({ success: false, message: 'Upload failed', error: error.message });
+  }
+});
+
 module.exports = router;

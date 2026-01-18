@@ -84,7 +84,24 @@ const ContestSchema = new mongoose.Schema({
     participants: [{
         type: mongoose.Schema.Types.ObjectId,
         ref: 'User'
-    }]
+    }],
+    rules: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'ContestRules'
+    },
+    settlement: {
+        finalized: { type: Boolean, default: false },
+        finalizedAt: Date,
+        payoutStatus: {
+            type: String,
+            enum: ['pending', 'processing', 'paid', 'failed'],
+            default: 'pending'
+        },
+        holdReason: {
+            type: String
+        }
+
+    }
 
 }, {
     timestamps: true,

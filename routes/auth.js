@@ -183,7 +183,9 @@ router.post('/login', async (req, res) => {
 //router.use(apiKeyAuth);
 
 // Get users
-router.get('/getusers', apiKeyAuth,async (req, res) => {
+router.get('/getusers', 
+  // apiKeyAuth
+  async (req, res) => {
   const users = await User.find({}, '-password');
   res.status(200).json(users);
 });

@@ -31,7 +31,14 @@ const ContestEntrySchema = new mongoose.Schema({
     submittedAt: {
         type: Date,
         default: null
-    }
+    },
+    breakdown: {
+        quality: Number,
+        safety: Number,
+        theme: Number
+    },
+    verdict: String,
+
 
 }, { timestamps: true });
 
