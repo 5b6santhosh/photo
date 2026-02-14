@@ -8,7 +8,7 @@ require('dotenv').config();
 const requiredEnvVars = [
     'JWT_SECRET',
     'HF_TOKEN',
-    'MONGODB_URI'
+    'MONGO_URI'
 ];
 
 const missingVars = requiredEnvVars.filter(varName => !process.env[varName]);
@@ -26,7 +26,7 @@ const APP_CONFIG = {
     nodeEnv: process.env.NODE_ENV || 'development',
 
     // Database
-    mongodbUri: process.env.MONGODB_URI,
+    mongodbUri: process.env.MONGO_URI,
 
     // Authentication
     jwtSecret: process.env.JWT_SECRET,

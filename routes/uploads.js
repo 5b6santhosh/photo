@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path'); // Optional, for better path handling
 const FileMeta = require('../models/FileMeta');
 const { uploadToProvider } = require('../services/storageService');
-const apiKeyAuth = require('../middleware/apiKeyAuth');
+const { authMiddleware } = require('../middleware/auth');
 
 const router = express.Router();
 
@@ -13,7 +13,8 @@ const router = express.Router();
 const upload = multer({ dest: 'temp/' });
 // Apply API-key auth for everything below
 
-router.use(apiKeyAuth);
+router.use(authMiddleware);
+
 
 router.post('/', upload.single('file'), async (req, res) => {
   let tempFilePath = null;
@@ -44,7 +45,7 @@ router.post('/', upload.single('file'), async (req, res) => {
       isVideo: req.file.mimetype.startsWith('video/'),
       thumbnailUrl: cloudFile.thumbnailUrl || null,
       isCurated: false,
-      createdBy: req.headers['x-user-id'] || 'anonymous',
+      createdBy: req.user.id, 
       description: req.body.description
     });
 

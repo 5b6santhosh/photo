@@ -1,34 +1,10 @@
-// const jwt = require('jsonwebtoken');
-// const User = require('../models/User');
-
-// module.exports = async function auth(req, res, next) {
-//     try {
-//         const token = req.headers.authorization?.split(' ')[1];
-//         if (!token) return res.status(401).json({ message: 'No token' });
-
-//         const decoded = jwt.verify(token, process.env.JWT_SECRET);
-//         const user = await User.findById(decoded.id).lean();
-
-//         if (!user) return res.status(401).json({ message: 'Invalid user' });
-
-//         req.user = {
-//             id: user._id.toString(),
-//             role: user.role,          // 'user' | 'admin'
-//             badgeTier: user.badgeTier // newCurator | bronze | silver | gold | master
-//         };
-
-//         next();
-//     } catch (e) {
-//         res.status(401).json({ message: 'Auth failed' });
-//     }
-// };
-
 
 // ============================================
 // AUTHENTICATION MIDDLEWARE
 // ============================================
 
 const jwt = require('jsonwebtoken');
+const User = require('../models/User');
 
 // Verify JWT token
 const authMiddleware = async (req, res, next) => {
@@ -50,7 +26,7 @@ const authMiddleware = async (req, res, next) => {
 
         // Attach user info to request
         req.user = {
-            id: decoded.userId,
+            id: decoded.userId.toString(),
             email: decoded.email,
             role: decoded.role || 'user',
             badgeTier: decoded.badgeTier // newCurator | bronze | silver | gold | master
@@ -78,25 +54,50 @@ const authMiddleware = async (req, res, next) => {
 };
 
 // Optional auth - doesn't fail if no token
+// const optionalAuth = async (req, res, next) => {
+//     try {
+//         const authHeader = req.headers.authorization;
+
+//         if (authHeader && authHeader.startsWith('Bearer ')) {
+//             const token = authHeader.substring(7);
+//             const decoded = jwt.verify(token, process.env.JWT_SECRET);
+
+//             req.user = {
+//                 id: decoded.userId,
+//                 email: decoded.email,
+//                 role: decoded.role || 'user',
+//                 badgeTier: decoded.badgeTier // newCurator | bronze | silver | gold | master
+//             };
+//         }
+
+//         next();
+//     } catch (error) {
+//         // Continue without user info
+//         next();
+//     }
+// };
 const optionalAuth = async (req, res, next) => {
     try {
-        const authHeader = req.headers.authorization;
+        // Get token from header
+        const token = req.header('Authorization')?.replace('Bearer ', '') ||
+            req.header('x-auth-token') ||
+            req.query.token;
 
-        if (authHeader && authHeader.startsWith('Bearer ')) {
-            const token = authHeader.substring(7);
-            const decoded = jwt.verify(token, process.env.JWT_SECRET);
-
-            req.user = {
-                id: decoded.userId,
-                email: decoded.email,
-                role: decoded.role || 'user',
-                badgeTier: decoded.badgeTier // newCurator | bronze | silver | gold | master
-            };
+        if (!token) {
+            return next();
         }
 
+        // Verify token
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+
+        // Attach user to req object
+        const user = await User.findById(decoded.userId).select('-password');
+        req.user = user;
+
         next();
-    } catch (error) {
-        // Continue without user info
+    } catch (err) {
+        // Invalid token - continue as guest
+        console.warn('Invalid optional token:', err.message);
         next();
     }
 };
@@ -138,9 +139,11 @@ const requireJudge = (req, res, next) => {
 
     next();
 };
+// const apiKeyAuth = require('./apiKeyAuth');
 
 module.exports = {
     authMiddleware,
+    // apiKeyAuth,
     optionalAuth,
     requireAdmin,
     requireJudge

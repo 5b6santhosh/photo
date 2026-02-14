@@ -1,7 +1,6 @@
 const express = require('express');
 const mongoose = require('mongoose');
 const razorpay = require('../services/razorpay');
-const auth = require('../middleware/auth');
 const crypto = require('crypto');
 const Payment = require('../models/Payment');
 const Contest = require('../models/Contest');
@@ -9,13 +8,14 @@ const { getFxRate } = require('../services/fxService');
 const { getRegion } = require('../config/currencyMap');
 const User = require('../models/User');
 const ContestEntry = require('../models/ContestEntry');
+const { authMiddleware } = require('../middleware/auth');
 
 const router = express.Router();
 
 /**
  * POST /api/payments/create-order
  */
-router.post('/create-order', auth, async (req, res) => {
+router.post('/create-order', authMiddleware, async (req, res) => {
     try {
         const { contestId, countryCode } = req.body;
 
@@ -155,7 +155,7 @@ router.post('/create-order', auth, async (req, res) => {
 
 
 // POST /api/payments/verify
-router.post('/verify', auth, async (req, res) => {
+router.post('/verify', authMiddleware, async (req, res) => {
     const {
         razorpay_order_id,
         razorpay_payment_id,
@@ -279,7 +279,7 @@ router.post('/verify', auth, async (req, res) => {
  * GET /api/payments/status/:paymentId
  * Check payment verification status (for polling after payment)
  */
-router.get('/status/:paymentId', auth, async (req, res) => {
+router.get('/status/:paymentId', authMiddleware, async (req, res) => {
     try {
         const { paymentId } = req.params;
 
@@ -325,7 +325,7 @@ router.get('/status/:paymentId', auth, async (req, res) => {
  * GET /api/payments/my-payments
  * Get user's payment history
  */
-router.get('/my-payments', auth, async (req, res) => {
+router.get('/my-payments', authMiddleware, async (req, res) => {
     try {
         const payments = await Payment.find({ userId: req.user.id })
             .populate('contestId', 'title entryFee')
@@ -345,7 +345,7 @@ router.get('/my-payments', auth, async (req, res) => {
  * GET /api/payments/status-by-contest/:contestId
  * Get payment status for a user in a specific contest
  */
-router.get('/status-by-contest/:contestId', auth, async (req, res) => {
+router.get('/status-by-contest/:contestId', authMiddleware, async (req, res) => {
     try {
         const { contestId } = req.params;
         const userId = req.user.id;

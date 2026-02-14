@@ -123,7 +123,7 @@ app.use('/api/media/appeals', appealsLimiter);
 
 // Media evaluation & contest ranking routes
 app.use('/api/media', require('./routes/contest.routes'));
-app.use('/api', require('./routes/contestRanking'));
+// app.use('/api', require('./routes/contestRanking'));
 
 // ============================================
 // STATIC FILES
@@ -294,7 +294,10 @@ process.on('unhandledRejection', (err) => {
 // ============================================
 
 // Railway assigns a PORT, fallback to 5000 for local dev
-const PORT = process.env.PORT || 5000;
+// const PORT = process.env.PORT || 5000;
+const CONFIG = require('./config');
+const PORT = CONFIG.port;
+
 
 const server = app.listen(PORT, '0.0.0.0', () => {
   console.log('\n' + '='.repeat(60));

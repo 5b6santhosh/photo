@@ -1,12 +1,11 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
-const crypto = require('crypto');
+const jwt = require('jsonwebtoken');
 const User = require('../models/User');
-const Temp_signup  = require('../models/Temp_signup');
-
-const apiKeyAuth = require('../middleware/apiKeyAuth');
+const Temp_signup = require('../models/Temp_signup');
 
 const mailService = require("../services/mail.service");
+const { authMiddleware, requireAdmin } = require('../middleware/auth'); 
 
 const router = express.Router();
 
@@ -158,20 +157,37 @@ router.post('/login', async (req, res) => {
       return res.status(400).json({ message: 'Invalid email or password' });
     }
 
-    // Generate API key
-    const apiKey = crypto.randomBytes(32).toString('hex');
-    user.apikey = apiKey;
+    // Update last login timestamp (auditing only)
     user.login_date = new Date();
-
-    
     await user.save();
 
+    // GENERATE JWT TOKEN (7-day expiry)
+    const token = jwt.sign(
+      {
+        userId: user._id.toString(), // Critical: stringify ObjectId
+        email: user.email,
+        role: user.role || 'user',
+        badgeTier: user.badgeTier || 'newCurator'
+      },
+      process.env.JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+
+    // RETURN TOKEN + SANITIZED USER DATA
     res.status(200).json({
       message: 'Login successful',
-      apiKey: apiKey
+      token,
+      user: {
+        id: user._id,
+        email: user.email,
+        username: user.username,
+        role: user.role,
+        badgeTier: user.badgeTier
+      }
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('Login error:', err);
+    res.status(500).json({ error: 'Authentication failed' });
   }
 });
 
@@ -183,32 +199,54 @@ router.post('/login', async (req, res) => {
 //router.use(apiKeyAuth);
 
 // Get users
-router.get('/getusers', 
-  // apiKeyAuth
-  async (req, res) => {
-  const users = await User.find({}, '-password');
-  res.status(200).json(users);
+router.get('/getusers', authMiddleware, requireAdmin, async (req, res) => {
+  try {
+    // EXCLUDE SENSITIVE FIELDS
+    const users = await User.find({}, '-password -apikey -__v').lean();
+    res.status(200).json(users);
+  } catch (err) {
+    console.error('Fetch users error:', err);
+    res.status(500).json({ error: 'Failed to fetch users' });
+  }
 });
+
 
 // Update user
-router.put('/update/:id',apiKeyAuth,async (req, res) => {
-  const { id } = req.params;
-  const { username, email } = req.body;
+router.put('/update/:id', authMiddleware, async (req, res) => {
+  try {
+    const { id } = req.params;
 
-  const updatedUser = await User.findByIdAndUpdate(
-    id,
-    { username, email },
-    { new: true, runValidators: true }
-  );
+    // 🔒 CRITICAL: Ownership/Admin validation
+    if (req.user.id !== id && req.user.role !== 'admin') {
+      return res.status(403).json({
+        message: 'You can only update your own profile'
+      });
+    }
 
-  if (!updatedUser) {
-    return res.status(404).json({ message: 'User not found' });
+    const { username, email } = req.body;
+    const updatedUser = await User.findByIdAndUpdate(
+      id,
+      { username, email },
+      {
+        new: true,
+        runValidators: true,
+        select: '-password -apikey -__v' // Exclude sensitive fields
+      }
+    );
+
+    if (!updatedUser) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    res.status(200).json({
+      message: 'User updated successfully',
+      user: updatedUser
+    });
+  } catch (err) {
+    console.error('Update user error:', err);
+    res.status(500).json({ error: 'Failed to update user' });
   }
-
-  res.status(200).json({
-    message: 'User updated successfully',
-    user: updatedUser
-  });
 });
+
 
 module.exports = router;

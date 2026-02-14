@@ -1,7 +1,6 @@
 const express = require('express');
 const mongoose = require('mongoose');
-const auth = require('../middleware/auth');
-const optionalAuth = require('../middleware/optionalToken');
+const { authMiddleware: auth, optionalAuth } = require('../middleware/auth');
 const User = require('../models/User');
 const FileMeta = require('../models/FileMeta');
 const Like = require('../models/Like');
