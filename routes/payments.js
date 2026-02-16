@@ -30,8 +30,17 @@ router.post('/create-order', authMiddleware, async (req, res) => {
         if (!contest.isOpenForSubmissions) {
             return res.status(400).json({ message: 'Contest is not open' });
         }
-        if (contest.prizeText <= 0) {
-            return res.status(400).json({ message: 'This contest is free' });
+        let baseInINR = contest.entryFee || 0;
+
+        if (baseInINR <= 0 && contest.prizeText) {
+            const match = contest.prizeText.match(/\d+/);
+            if (match) {
+                baseInINR = parseInt(match[0], 10);
+            }
+        }
+
+        if (!baseInINR || baseInINR <= 0) {
+            return res.status(400).json({ message: 'This contest is free or has no entry fee set' });
         }
 
         const existingPayment = await Payment.findOne({
@@ -70,8 +79,6 @@ router.post('/create-order', authMiddleware, async (req, res) => {
 
         const region = getRegion(countryCode);
         const { currency, multiplier } = region;
-
-        const baseInINR = contest.entryFee;
         let finalAmount;
         let fxRate;
 
@@ -221,7 +228,7 @@ router.post('/verify', authMiddleware, async (req, res) => {
         }
 
         const contest = await Contest.findById(contestId);
-        if (!contest || contest.entryFee <= 0) {
+        if (!contest || contest.prizeText <= 0) {
             return res.status(400).json({ verified: false });
         }
 

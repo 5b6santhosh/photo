@@ -122,6 +122,13 @@ ContestSchema.virtual('isOpenForSubmissions').get(function () {
     return isActive && this.startDate <= now && this.endDate >= now;
 });
 
+ContestSchema.virtual('parsedEntryFee').get(function () {
+    if (this.entryFee > 0) return this.entryFee;
+    if (!this.prizeText) return 0;
+    const match = this.prizeText.match(/\d+/);
+    return match ? parseInt(match[0], 10) : 0;
+});
+
 // --- MIDDLEWARE ---
 // ContestSchema.pre('save', function (next) {
 //     if (this.isModified('submissions')) {
