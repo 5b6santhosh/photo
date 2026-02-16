@@ -17,7 +17,6 @@ router.get('/me', auth, async (req, res) => {
         const userId = req.user.id;
 
         const user = await User.findById(userId)
-            // .select('-password -resetPasswordToken -resetPasswordExpire -__v')
             .lean();
 
         if (!user) {
@@ -27,7 +26,7 @@ router.get('/me', auth, async (req, res) => {
             });
         }
 
-        //  Count all photos (including private ones for own profile)
+        // Count all photos (including private ones for own profile)
         const totalPhotos = await FileMeta.countDocuments({
             createdBy: userId,
             archived: false,
@@ -48,6 +47,16 @@ router.get('/me', auth, async (req, res) => {
                 totalPhotos,
                 wins: user.wins || 0,
                 streakDays: user.streakDays || 0,
+                location: user.location || {
+                    city: '',
+                    state: '',
+                    country: '',
+                    countryCode: '',
+                    latitude: null,
+                    longitude: null,
+                    lastUpdated: null
+                },
+                isProfileCompleted: user.isProfileCompleted || false,
             }
         });
     } catch (e) {
@@ -62,14 +71,13 @@ router.get('/me', auth, async (req, res) => {
 /**
  * GET /api/profile/:userId
  * Public profile view
- *  FIXED: Now supports optional authentication
  */
 router.get('/:userId', optionalAuth, async (req, res) => {
     try {
         const { userId } = req.params;
         const viewerId = req.user?.id;
 
-        //  Validate ObjectId
+        // Validate ObjectId
         if (!mongoose.Types.ObjectId.isValid(userId)) {
             return res.status(400).json({
                 success: false,
@@ -78,7 +86,7 @@ router.get('/:userId', optionalAuth, async (req, res) => {
         }
 
         const user = await User.findById(userId)
-            .select('name firstName username avatarUrl bio wins streakDays')
+            .select('name firstName username avatarUrl bio wins streakDays location')
             .lean();
 
         if (!user) {
@@ -88,7 +96,7 @@ router.get('/:userId', optionalAuth, async (req, res) => {
             });
         }
 
-        //  If viewing own profile, show all photos; otherwise show only public
+        // If viewing own profile, show all photos; otherwise show only public
         const photoQuery = {
             createdBy: userId,
             archived: false,
@@ -114,7 +122,15 @@ router.get('/:userId', optionalAuth, async (req, res) => {
                 totalPhotos,
                 wins: user.wins || 0,
                 streakDays: user.streakDays || 0,
-                isOwnProfile: viewerId === userId, //  Let frontend know if this is user's own profile
+                isOwnProfile: viewerId === userId,
+                location: user.location || {
+                    city: '',
+                    state: '',
+                    country: '',
+                    countryCode: '',
+                    latitude: null,
+                    longitude: null
+                }
             }
         });
     } catch (e) {
@@ -128,16 +144,15 @@ router.get('/:userId', optionalAuth, async (req, res) => {
 
 /**
  * GET /api/profile/:userId/gallery
- * Returns full Reel objects (same as /feed/infinite) for user's content
- *  FIXED: Proper authentication, pagination, and error handling
+ * Returns full Reel objects for user's content
  */
 router.get('/:userId/gallery', optionalAuth, async (req, res) => {
     try {
         const viewerId = req.user?.id;
         const { userId } = req.params;
-        const { page = 1, limit = 20 } = req.query; //  Add pagination
+        const { page = 1, limit = 20 } = req.query;
 
-        //  Validate ObjectId
+        // Validate ObjectId
         if (!mongoose.Types.ObjectId.isValid(userId)) {
             return res.status(400).json({
                 success: false,
@@ -145,14 +160,14 @@ router.get('/:userId/gallery', optionalAuth, async (req, res) => {
             });
         }
 
-        //  Validate pagination params
+        // Validate pagination params
         const pageNum = Math.max(1, parseInt(page));
-        const limitNum = Math.min(50, Math.max(1, parseInt(limit))); // Cap at 50
+        const limitNum = Math.min(50, Math.max(1, parseInt(limit)));
         const skip = (pageNum - 1) * limitNum;
 
-        // 1. Fetch user data
+        // Fetch user data with location
         const targetUser = await User.findById(userId)
-            .select('name firstName avatarUrl bio wins streakDays')
+            .select('name firstName avatarUrl bio wins streakDays location')
             .lean();
 
         if (!targetUser) {
@@ -162,7 +177,7 @@ router.get('/:userId/gallery', optionalAuth, async (req, res) => {
             });
         }
 
-        // 2. Build query - show all if viewing own profile, only public otherwise
+        // Build query - show all if viewing own profile, only public otherwise
         const galleryQuery = {
             createdBy: userId,
             archived: false,
@@ -172,19 +187,19 @@ router.get('/:userId/gallery', optionalAuth, async (req, res) => {
             galleryQuery.visibility = 'public';
         }
 
-        //  Get total count for pagination
+        // Get total count for pagination
         const totalCount = await FileMeta.countDocuments(galleryQuery);
 
-        // 3. Fetch files with pagination
+        // Fetch files with pagination
         const files = await FileMeta.find(galleryQuery)
             .sort({ uploadedAt: -1 })
             .skip(skip)
             .limit(limitNum)
-            .populate('createdBy', 'name firstName avatarUrl wins')
+            .populate('createdBy', 'name firstName avatarUrl wins location')
             .populate('event', 'title')
             .lean();
 
-        //  Handle case when no files found
+        // Handle case when no files found
         if (files.length === 0) {
             return res.json({
                 success: true,
@@ -194,6 +209,12 @@ router.get('/:userId/gallery', optionalAuth, async (req, res) => {
                     wins: targetUser.wins || 0,
                     avatarUrl: targetUser.avatarUrl || '',
                     bio: targetUser.bio || '',
+                    location: targetUser.location || {
+                        city: '',
+                        state: '',
+                        country: '',
+                        countryCode: ''
+                    }
                 },
                 gallery: [],
                 pagination: {
@@ -206,7 +227,7 @@ router.get('/:userId/gallery', optionalAuth, async (req, res) => {
             });
         }
 
-        // 4. Build liked/bookmarked sets for the viewer
+        // Build liked/bookmarked sets for the viewer
         let likedSet = new Set();
         let bookmarkedSet = new Set();
 
@@ -226,11 +247,13 @@ router.get('/:userId/gallery', optionalAuth, async (req, res) => {
             bookmarkedSet = new Set(favs.map(id => id.toString()));
         }
 
-        // 5. Build gallery items matching Flutter's Reel & PhotoModel expectations
+        // Build gallery items
         const gallery = files.map(f => {
             const isVideo = f.mimeType?.startsWith('video/');
             const user = f.createdBy || {};
             const displayName = user.name || user.firstName || 'Curator';
+            // FIX: Define userLocation properly
+            const userLocation = user.location || {};
 
             return {
                 id: f._id.toString(),
@@ -249,17 +272,24 @@ router.get('/:userId/gallery', optionalAuth, async (req, res) => {
                     name: displayName,
                     avatarUrl: user.avatarUrl || '',
                     wins: user.wins || 0,
+                    // Include creator's location in gallery items
+                    location: {
+                        city: userLocation.city || '',
+                        state: userLocation.state || '',
+                        country: userLocation.country || '',
+                        countryCode: userLocation.countryCode || ''
+                    }
                 },
                 eventTitle: f.event?.title || 'General',
                 likes: f.likesCount || 0,
                 comments: f.commentsCount || 0,
                 isLiked: likedSet.has(f._id.toString()),
                 isBookmarked: bookmarkedSet.has(f._id.toString()),
-                visibility: f.visibility || 'public', //  Include visibility
+                visibility: f.visibility || 'public',
             };
         });
 
-        //  Calculate pagination info
+        // Calculate pagination info
         const totalPages = Math.ceil(totalCount / limitNum);
         const hasMore = pageNum < totalPages;
 
@@ -272,6 +302,12 @@ router.get('/:userId/gallery', optionalAuth, async (req, res) => {
                 avatarUrl: targetUser.avatarUrl || '',
                 bio: targetUser.bio || '',
                 streakDays: targetUser.streakDays || 0,
+                location: targetUser.location || {
+                    city: '',
+                    state: '',
+                    country: '',
+                    countryCode: ''
+                }
             },
             gallery,
             pagination: {
@@ -294,15 +330,28 @@ router.get('/:userId/gallery', optionalAuth, async (req, res) => {
 
 /**
  * PUT /api/profile/me
- * Update logged-in user's profile
- *  FIXED: Better validation and error handling
+ * Update logged-in user's profile (WITH LOCATION SUPPORT)
  */
 router.put('/me', auth, async (req, res) => {
     try {
         const userId = req.user.id;
-        const { firstName, avatarUrl, bio, username } = req.body;
+        const {
+            firstName,
+            avatarUrl,
+            bio,
+            username,
+            // Location fields from Flutter app (snake_case or camelCase)
+            country,
+            state,
+            city,
+            countryCode,
+            country_code, // Support both formats
+            latitude,
+            longitude,
+            locationSource // 'gps' or 'manual'
+        } = req.body;
 
-        //  Validate required fields if provided
+        // Validate required fields if provided
         if (firstName !== undefined && typeof firstName !== 'string') {
             return res.status(400).json({
                 success: false,
@@ -324,7 +373,56 @@ router.put('/me', auth, async (req, res) => {
             });
         }
 
-        //  Validate username format and uniqueness if provided
+        // Validate location fields if provided
+        // Support both camelCase and snake_case from Flutter
+        const locCountry = country !== undefined ? country : undefined;
+        const locState = state !== undefined ? state : undefined;
+        const locCity = city !== undefined ? city : undefined;
+        const locCountryCode = countryCode !== undefined ? countryCode : country_code;
+
+        if (locCountry !== undefined && typeof locCountry !== 'string') {
+            return res.status(400).json({
+                success: false,
+                message: 'country must be a string'
+            });
+        }
+
+        if (locState !== undefined && typeof locState !== 'string') {
+            return res.status(400).json({
+                success: false,
+                message: 'state must be a string'
+            });
+        }
+
+        if (locCity !== undefined && typeof locCity !== 'string') {
+            return res.status(400).json({
+                success: false,
+                message: 'city must be a string'
+            });
+        }
+
+        if (locCountryCode !== undefined && typeof locCountryCode !== 'string') {
+            return res.status(400).json({
+                success: false,
+                message: 'countryCode must be a string'
+            });
+        }
+
+        if (latitude !== undefined && (typeof latitude !== 'number' || isNaN(latitude))) {
+            return res.status(400).json({
+                success: false,
+                message: 'latitude must be a valid number'
+            });
+        }
+
+        if (longitude !== undefined && (typeof longitude !== 'number' || isNaN(longitude))) {
+            return res.status(400).json({
+                success: false,
+                message: 'longitude must be a valid number'
+            });
+        }
+
+        // Validate username format and uniqueness if provided
         if (username !== undefined) {
             // Check format: alphanumeric, underscore, hyphen only
             if (!/^[a-zA-Z0-9_-]{3,30}$/.test(username)) {
@@ -348,14 +446,35 @@ router.put('/me', auth, async (req, res) => {
             }
         }
 
-        //  Build update fields object (only include defined fields)
+        // Build update fields object (only include defined fields)
         const updateFields = {};
         if (firstName !== undefined) updateFields.firstName = firstName.trim();
         if (username !== undefined) updateFields.username = username.trim().toLowerCase();
         if (bio !== undefined) updateFields.bio = bio.trim();
         if (avatarUrl !== undefined) updateFields.avatarUrl = avatarUrl.trim();
 
-        //  Check if there are actually fields to update
+        if (firstName || avatarUrl || bio) {
+            updateFields.isProfileCompleted = true;
+        }
+        // Build location update if any location field is provided
+        const locationUpdate = {};
+        if (locCountry !== undefined) locationUpdate['location.country'] = locCountry.trim();
+        if (locState !== undefined) locationUpdate['location.state'] = locState.trim();
+        if (locCity !== undefined) locationUpdate['location.city'] = locCity.trim();
+        if (locCountryCode !== undefined) locationUpdate['location.countryCode'] = locCountryCode.trim().toUpperCase();
+        if (latitude !== undefined) locationUpdate['location.latitude'] = latitude;
+        if (longitude !== undefined) locationUpdate['location.longitude'] = longitude;
+        if (locationSource !== undefined) locationUpdate['location.source'] = locationSource;
+
+        // Always update the lastUpdated timestamp if any location field is provided
+        if (Object.keys(locationUpdate).length > 0) {
+            locationUpdate['location.lastUpdated'] = new Date();
+        }
+
+        // Merge location updates into updateFields
+        Object.assign(updateFields, locationUpdate);
+
+        // Check if there are actually fields to update
         if (Object.keys(updateFields).length === 0) {
             return res.status(400).json({
                 success: false,
@@ -363,7 +482,7 @@ router.put('/me', auth, async (req, res) => {
             });
         }
 
-        //  Update the user
+        // Update the user
         const updatedUser = await User.findByIdAndUpdate(
             userId,
             { $set: updateFields },
@@ -382,12 +501,25 @@ router.put('/me', auth, async (req, res) => {
         res.json({
             success: true,
             message: 'Profile updated successfully',
-            user: updatedUser
+            user: {
+                ...updatedUser,
+                location: updatedUser.location || {
+                    city: '',
+                    state: '',
+                    country: '',
+                    countryCode: '',
+                    latitude: null,
+                    longitude: null,
+                    source: null,
+                    lastUpdated: null
+                },
+                isProfileCompleted: updatedUser.isProfileCompleted || false,
+            }
         });
     } catch (e) {
         console.error('PROFILE_UPDATE_ERROR', e);
 
-        //  Handle specific mongoose errors
+        // Handle specific mongoose errors
         if (e.name === 'ValidationError') {
             return res.status(400).json({
                 success: false,
@@ -411,14 +543,14 @@ router.put('/me', auth, async (req, res) => {
 
 /**
  * DELETE /api/profile/me
- *  NEW: Delete user account
+ * Delete user account
  */
 router.delete('/me', auth, async (req, res) => {
     try {
         const userId = req.user.id;
         const { confirmPassword } = req.body;
 
-        //  Validate password confirmation
+        // Validate password confirmation
         if (!confirmPassword) {
             return res.status(400).json({
                 success: false,
@@ -434,7 +566,7 @@ router.delete('/me', auth, async (req, res) => {
             });
         }
 
-        //  Verify password
+        // Verify password
         const isPasswordValid = await user.comparePassword(confirmPassword);
         if (!isPasswordValid) {
             return res.status(401).json({
@@ -443,7 +575,7 @@ router.delete('/me', auth, async (req, res) => {
             });
         }
 
-        //  Soft delete: Archive user's content instead of hard delete
+        // Soft delete: Archive user's content instead of hard delete
         await Promise.all([
             // Archive all user's files
             FileMeta.updateMany(
@@ -458,7 +590,7 @@ router.delete('/me', auth, async (req, res) => {
                 $set: {
                     deleted: true,
                     deletedAt: new Date(),
-                    email: `deleted_${userId}@deleted.com`, // Prevent email reuse
+                    email: `deleted_${userId}@deleted.com`,
                     username: `deleted_${userId}`,
                 }
             })
@@ -473,6 +605,85 @@ router.delete('/me', auth, async (req, res) => {
         res.status(500).json({
             success: false,
             message: 'Failed to delete account'
+        });
+    }
+});
+
+/**
+ * PUT /api/profile/me/location
+ * Dedicated endpoint for updating location only
+ */
+router.put('/me/location', auth, async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const {
+            country,
+            state,
+            city,
+            countryCode,
+            country_code,
+            latitude,
+            longitude,
+            source
+        } = req.body;
+
+        // Support both snake_case and camelCase
+        const locCountry = country || req.body.country;
+        const locCountryCode = countryCode || country_code;
+
+        // Validate required fields
+        if (!locCountry || !city) {
+            return res.status(400).json({
+                success: false,
+                message: 'Country and city are required'
+            });
+        }
+
+        // Validate types
+        if (typeof locCountry !== 'string' || typeof city !== 'string') {
+            return res.status(400).json({
+                success: false,
+                message: 'Country and city must be strings'
+            });
+        }
+
+        const updateFields = {
+            'location.country': locCountry.trim(),
+            'location.city': city.trim(),
+            'location.lastUpdated': new Date()
+        };
+
+        if (state !== undefined) updateFields['location.state'] = state.trim();
+        if (locCountryCode !== undefined) updateFields['location.countryCode'] = locCountryCode.trim().toUpperCase();
+        if (latitude !== undefined) updateFields['location.latitude'] = latitude;
+        if (longitude !== undefined) updateFields['location.longitude'] = longitude;
+        if (source !== undefined) updateFields['location.source'] = source;
+
+        const updatedUser = await User.findByIdAndUpdate(
+            userId,
+            { $set: updateFields },
+            { new: true, runValidators: true }
+        )
+            .select('location')
+            .lean();
+
+        if (!updatedUser) {
+            return res.status(404).json({
+                success: false,
+                message: 'User not found'
+            });
+        }
+
+        res.json({
+            success: true,
+            message: 'Location updated successfully',
+            location: updatedUser.location
+        });
+    } catch (e) {
+        console.error('LOCATION_UPDATE_ERROR', e);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to update location'
         });
     }
 });

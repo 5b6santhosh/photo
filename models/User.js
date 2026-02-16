@@ -25,6 +25,20 @@ const UserSchema = new mongoose.Schema({
   streakDays: { type: Number, default: 0 },
   followersCount: { type: Number, default: 0 },
   followingCount: { type: Number, default: 0 },
+  location: {
+    city: { type: String, default: '' },
+    state: { type: String, default: '' },
+    country: { type: String, default: '' },
+    countryCode: { type: String, default: '' },
+    latitude: { type: Number, default: null },
+    longitude: { type: Number, default: null },
+    source: { type: String, default: null },
+    lastUpdated: { type: Date, default: null }
+  },
+  isProfileCompleted: {
+    type: Boolean,
+    default: false
+  },
   countries: [{
     code: String, // "IN", "US", "DE"
     name: String
@@ -38,16 +52,19 @@ const UserSchema = new mongoose.Schema({
     ref: 'Contest'
   }],
   isActive: {
-  type: Number,
-  enum: [0, 1],
-  default: 1,   // 1 = active
-  required: true
-}
+    type: Number,
+    enum: [0, 1],
+    default: 1,   // 1 = active
+    required: true
+  }
 
 }, {
   timestamps: true
 });
 UserSchema.index({ contestsJoined: 1 }); // Find users in a contest
 UserSchema.index({ payments: 1 });       // Find user by payment
+UserSchema.index({ 'location.country': 1 }); // Find users by country
+UserSchema.index({ 'location.city': 1 });    // Find users by city
+UserSchema.index({ 'location.countryCode': 1 });
 
 module.exports = mongoose.model('User', UserSchema);

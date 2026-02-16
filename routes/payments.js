@@ -30,7 +30,7 @@ router.post('/create-order', authMiddleware, async (req, res) => {
         if (!contest.isOpenForSubmissions) {
             return res.status(400).json({ message: 'Contest is not open' });
         }
-        if (contest.entryFee <= 0) {
+        if (contest.prizeText <= 0) {
             return res.status(400).json({ message: 'This contest is free' });
         }
 
