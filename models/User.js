@@ -1,10 +1,6 @@
 const mongoose = require('mongoose');
 
 const UserSchema = new mongoose.Schema({
-  _id: {
-    type: String,
-    required: true
-  },
   username: {
     type: String, required: true, unique: true, trim: true
   },
@@ -60,12 +56,20 @@ const UserSchema = new mongoose.Schema({
     enum: [0, 1],
     default: 1,   // 1 = active
     required: true
+  },
+  role: {
+    type: String,
+    enum: ['user', 'admin', 'judge'],
+    default: 'user'
+  },
+  badgeTier: {
+    type: String,
+    default: 'newCurator'
   }
+
 
 }, {
   timestamps: true,
-  autoCreate: true,
-  autoIndex: true
 
 });
 UserSchema.index({ contestsJoined: 1 }); // Find users in a contest
