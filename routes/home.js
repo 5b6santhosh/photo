@@ -1,11 +1,35 @@
 // routes/home.js
 const express = require('express');
+const mongoose = require('mongoose'); // Imported for ObjectId validation
 const router = express.Router();
 const User = require('../models/User');
 const FileMeta = require('../models/FileMeta');
 const Contest = require('../models/Contest');
-const Like = require('../models/Like');
 const Submission = require('../models/Submission');
+
+const isValidObjectId = (id) => {
+    return mongoose.Types.ObjectId.isValid(id);
+};
+
+function formatHighlightPhoto(photo, contestEndDate) {
+    if (!photo) return null;
+
+    return {
+        id: photo._id.toString(),
+        url: photo.path || photo.url || '',
+        thumbnailUrl: photo.thumbnailPath || photo.thumbnailUrl || photo.path || '',
+        title: photo.title || 'Untitled',
+        subtitle: photo.subtitle || photo.description || '',
+        location: photo.location || '',
+        date: photo.uploadedAt ? new Date(photo.uploadedAt).toISOString() : new Date(contestEndDate).toISOString(),
+        peopleCount: photo.peopleCount || 0,
+        category: photo.category || 'other',
+        likesCount: photo.likesCount || 0,
+        isFavorite: false,
+        aspectRatio: photo.aspectRatio || 9 / 16,
+        blurHash: photo.blurHash || null,
+    };
+}
 
 function formatTimeLabel(startDate, endDate) {
     const now = new Date();
@@ -37,18 +61,12 @@ function mapContest(contest, userId, photoMap, submissionStats) {
 
     const stats = submissionStats[contest._id.toString()] || { total: 0, myCount: 0 };
 
-    const highlightPhotos = (contest.highlightPhotos || []).map(id => {
-        const p = photoMap[id.toString()];
-        return {
-            id: id.toString(),
-            title: p?.title || 'Untitled',
-            location: p?.location || '',
-            date: p?.uploadedAt ? new Date(p.uploadedAt) : endDate,
-            peopleCount: p?.peopleCount || 0,
-            category: p?.category || 'other',
-            isFavorite: false
-        };
-    });
+    const highlightPhotos = (contest.highlightPhotos || [])
+        .map(id => {
+            const photo = photoMap[id.toString()];
+            return photo ? formatHighlightPhoto(photo, endDate) : null;
+        })
+        .filter(p => p !== null);
 
     return {
         id: contest._id.toString(),
@@ -64,13 +82,15 @@ function mapContest(contest, userId, photoMap, submissionStats) {
         timeLabel: formatTimeLabel(startDate, endDate),
         totalSubmissions: stats.total,
         mySubmissions: stats.myCount,
-        highlightPhotos
+        highlightPhotos,
+        coverImage: highlightPhotos.length > 0 ? highlightPhotos[0].url : null,
     };
 }
 
 router.get('/', async (req, res) => {
     try {
-        const userId = req.user?.id || null;
+        const rawUserId = req.user?.id || null;
+        const userId = (rawUserId && isValidObjectId(rawUserId)) ? rawUserId : null;
 
         // 1. User wins
         let userWins = 0;
@@ -80,34 +100,34 @@ router.get('/', async (req, res) => {
         }
 
         // 2. All contests
-        const contests = await Contest.find().sort({ startDate: 1 }).lean();
+        const contests = await Contest.find()
+            .sort({ startDate: -1 })
+            .lean();
         const contestIds = contests.map(c => c._id);
 
-        // 3. Submissions
-        let allSubmissions = [];
-        if (contestIds.length > 0) {
-            allSubmissions = await Submission.find({
-                contestId: { $in: contestIds }
-            }).select('contestId userId').lean();
-        }
-
-        // 4. Submission stats
+        // 3. Submissions aggregation
         const submissionStats = {};
         contestIds.forEach(id => {
             submissionStats[id.toString()] = { total: 0, myCount: 0 };
         });
 
-        allSubmissions.forEach(sub => {
-            const cid = sub.contestId.toString();
-            if (submissionStats[cid]) {
-                submissionStats[cid].total += 1;
-                if (userId && sub.userId?.toString() === userId) {
-                    submissionStats[cid].myCount += 1;
-                }
-            }
-        });
+        if (contestIds.length > 0) {
+            const submissions = await Submission.find({
+                contestId: { $in: contestIds }
+            }).select('contestId userId').lean();
 
-        // 5. Pre-fetch highlight photos
+            submissions.forEach(sub => {
+                const cid = sub.contestId.toString();
+                if (submissionStats[cid]) {
+                    submissionStats[cid].total += 1;
+                    if (userId && sub.userId?.toString() === userId) {
+                        submissionStats[cid].myCount += 1;
+                    }
+                }
+            });
+        }
+
+        // 4. Pre-fetch highlight photos
         const allHighlightIds = contests.flatMap(c =>
             (c.highlightPhotos || []).filter(id => id)
         );
@@ -115,59 +135,84 @@ router.get('/', async (req, res) => {
 
         const photoMap = {};
         if (uniqueHighlightIds.length > 0) {
-            const photos = await FileMeta.find({
-                _id: { $in: uniqueHighlightIds }
-            }).lean();
-            photos.forEach(p => {
-                photoMap[p._id.toString()] = p;
-            });
+            const validHighlightIds = uniqueHighlightIds.filter(id => isValidObjectId(id));
+
+            if (validHighlightIds.length > 0) {
+                const photos = await FileMeta.find({
+                    _id: { $in: validHighlightIds }
+                })
+                    .select('_id path thumbnailPath title subtitle description location uploadedAt peopleCount category likesCount aspectRatio blurHash')
+                    .lean();
+
+                photos.forEach(p => {
+                    photoMap[p._id.toString()] = p;
+                });
+            }
         }
 
-        // 6. Map all events as HeroEvent
+        // 5. Map contests
         const events = contests.map(c => mapContest(c, userId, photoMap, submissionStats));
 
-        // 7. Hero event
+        // 6. Hero event
         const heroEvent = events.find(e => e.isActive) ||
             events.find(e => e.isUpcoming) ||
-            events[0] || {};
+            events[0] || null;
 
-        // 8. Top curators
+        // 7. Top curators
         const topCurators = await User.find({ wins: { $gte: 3 } })
             .sort({ wins: -1 })
             .limit(12)
             .select('name avatarUrl wins')
             .lean();
 
-        // 9. Trending photos
-        const photos = await FileMeta.find({
+        // 8. Trending photos
+        const trendingPhotosRaw = await FileMeta.find({
             archived: false,
             visibility: 'public'
         })
             .sort({ likesCount: -1, uploadedAt: -1 })
             .limit(20)
+            .select('_id path thumbnailPath title location uploadedAt likesCount category createdBy')
             .lean();
 
-        const trendingPhotos = photos.map(p => ({
-            id: p._id.toString(),
-            imageUrl: p.path,
-            userName: p.createdBy ? 'Curator' : 'Anonymous', // ⚠️ Fix: createdBy is ObjectId, not name
+        const rawCreatorIds = trendingPhotosRaw.map(p => p.createdBy?.toString()).filter(Boolean);
+        const creatorIds = [...new Set(rawCreatorIds.filter(id => isValidObjectId(id)))];
+
+        const creators = await User.find({ _id: { $in: creatorIds } }).select('name').lean();
+        const creatorMap = {};
+        creators.forEach(c => creatorMap[c._id.toString()] = c.name);
+
+        const trendingPhotos = trendingPhotosRaw.map(p => ({
+            ...formatHighlightPhoto(p, new Date()),
+            userName: creatorMap[p.createdBy?.toString()] || 'Anonymous',
             isCurated: p.isCurated || false,
-            likes: p.likesCount || 0,
-            isLiked: false // Flutter computes this — or fetch efficiently as before
+            isLiked: false,
         }));
 
         res.json({
-            userWins,
-            heroEvent,
-            topCurators,
-            events,
-            trendingPhotos
+            success: true,
+            data: {
+                userWins,
+                heroEvent,
+                topCurators: topCurators.map(c => ({
+                    id: c._id.toString(),
+                    name: c.name,
+                    avatarUrl: c.avatarUrl,
+                    wins: c.wins,
+                })),
+                events,
+                trendingPhotos,
+            }
         });
 
     } catch (err) {
         console.error('HOME API ERROR:', err);
         if (!res.headersSent) {
-            res.status(500).json({ message: 'Home feed failed' });
+            res.status(500).json({
+                success: false,
+                message: 'Home feed failed',
+                error: process.env.NODE_ENV === 'development' ? err.message : undefined
+            });
         }
     }
 });

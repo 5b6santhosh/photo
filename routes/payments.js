@@ -16,10 +16,14 @@ const router = express.Router();
  * POST /api/payments/create-order
  */
 router.post('/create-order', authMiddleware, async (req, res) => {
+    let contestId;
+    let userId;
     try {
-        const { contestId, countryCode } = req.body;
+        const { contestId: bodyContestId, countryCode } = req.body;
+        contestId = bodyContestId;
+        userId = req.user.id;
 
-        if (!mongoose.Types.ObjectId.isValid(contestId)) {
+        if (!contestId || !mongoose.Types.ObjectId.isValid(contestId)) {
             return res.status(400).json({ message: 'Invalid contest ID' });
         }
 
@@ -27,12 +31,14 @@ router.post('/create-order', authMiddleware, async (req, res) => {
         if (!contest) {
             return res.status(404).json({ message: 'Event not found' });
         }
+
         if (!contest.isOpenForSubmissions) {
             return res.status(400).json({ message: 'Contest is not open' });
         }
-        let baseInINR = contest.entryFee || 0;
 
-        if (baseInINR <= 0 && contest.prizeText) {
+        // Get base amount in INR (the actual entry fee, e.g., 500)
+        let baseInINR = contest.entryFee || 0;
+        if (baseInINR <= 0 && contest.prizeText && !contest.entryFee) {
             const match = contest.prizeText.match(/\d+/);
             if (match) {
                 baseInINR = parseInt(match[0], 10);
@@ -40,11 +46,17 @@ router.post('/create-order', authMiddleware, async (req, res) => {
         }
 
         if (!baseInINR || baseInINR <= 0) {
-            return res.status(400).json({ message: 'This contest is free or has no entry fee set' });
+            console.log('Contest entry fee:', contest.entryFee);
+            console.log('Contest prizeText:', contest.prizeText);
+            return res.status(400).json({
+                message: 'This contest is free or has no entry fee set',
+                entryFee: contest.entryFee,
+                prizeText: contest.prizeText
+            });
         }
 
         const existingPayment = await Payment.findOne({
-            userId: req.user.id,
+            userId,
             contestId,
             status: { $in: ['pending', 'verified'] }
         });
@@ -58,33 +70,27 @@ router.post('/create-order', authMiddleware, async (req, res) => {
                 status: existingPayment.status
             });
         }
+
+        // Currencies that don't use decimal places (smallest unit = major unit)
         const ZERO_DECIMAL_CURRENCIES = new Set([
-            'BIF', // Burundian Franc
-            'CLP', // Chilean Peso  
-            'DJF', // Djiboutian Franc
-            'GNF', // Guinean Franc
-            'JPY', // Japanese Yen
-            'KMF', // Comorian Franc
-            'KRW', // South Korean Won
-            'MGA', // Malagasy Ariary
-            'PYG', // Paraguayan Guarani
-            'RWF', // Rwandan Franc
-            'UGX', // Ugandan Shilling
-            'VND', // Vietnamese Dong
-            'VUV', // Vanuatu Vatu
-            'XAF', // Central African CFA Franc
-            'XOF', // West African CFA Franc
-            'XPF'  // CFP Franc
+            'BIF', 'CLP', 'DJF', 'GNF', 'JPY', 'KMF', 'KRW', 'MGA',
+            'PYG', 'RWF', 'UGX', 'VND', 'VUV', 'XAF', 'XOF', 'XPF'
         ]);
 
         const region = getRegion(countryCode);
         const { currency, multiplier } = region;
+
         let finalAmount;
-        let fxRate;
+        let fxRate = 1;
+        let amountInTargetCurrency;
 
         if (currency === 'INR') {
-            finalAmount = baseInINR * 100;
+            // For INR: baseInINR is the major unit (e.g., 500 rupees)
+            // Razorpay expects smallest unit (paise), so multiply by 100
+            amountInTargetCurrency = baseInINR;
+            finalAmount = baseInINR * 100; // Convert to paise
         } else {
+            // Get exchange rate for target currency
             try {
                 fxRate = await getFxRate(currency);
                 if (!fxRate || fxRate <= 0) {
@@ -97,69 +103,113 @@ router.post('/create-order', authMiddleware, async (req, res) => {
                 });
             }
 
-            // finalAmount = Math.ceil(baseInINR * fxRate * multiplier * 100);
-            // Convert INR to target currency
-            const amountInTargetCurrency = baseInINR * fxRate * multiplier;
+            // Convert INR to target currency (major units)
+            // Example: 500 INR * 0.012 (USD rate) * 1 (multiplier) = 6 USD
+            amountInTargetCurrency = baseInINR * fxRate * multiplier;
+
+            // Convert to smallest unit based on currency type
             if (ZERO_DECIMAL_CURRENCIES.has(currency)) {
+                // For zero-decimal currencies (e.g., JPY), amount is already in smallest unit
                 finalAmount = Math.ceil(amountInTargetCurrency);
             } else {
+                // For decimal currencies (e.g., USD, EUR), multiply by 100 to get cents
                 finalAmount = Math.ceil(amountInTargetCurrency * 100);
             }
-
         }
 
-        if (finalAmount <= 0 || finalAmount > 1000000000) { // 10 crore paise max
-            return res.status(400).json({ message: 'Invalid payment amount calculated' });
+        // Validation
+        if (finalAmount <= 0 || finalAmount > 1000000000) {
+            return res.status(400).json({
+                message: 'Invalid payment amount calculated',
+                details: {
+                    baseInINR,
+                    currency,
+                    fxRate,
+                    amountInTargetCurrency,
+                    finalAmount
+                }
+            });
         }
 
-
-        const order = await razorpay.orders.create({
-            amount: finalAmount,
+        const receipt = `CTX_${contestId.slice(-8)}_${Date.now()}`;
+        console.log('Receipt:', receipt, 'Length:', receipt.length);
+        console.log('Payment calculation:', {
+            baseInINR,
             currency,
-            receipt: `contest_${contestId}_${Date.now()}`,
-            notes: {
-                contestId: contestId.toString(),
-                userId: req.user.id,
-                originalINR: baseInINR,
-                expectedAmount: finalAmount,
+            fxRate,
+            multiplier,
+            amountInTargetCurrency,
+            finalAmount
+        });
+
+        try {
+            const order = await razorpay.orders.create({
+                amount: finalAmount,
                 currency,
-                countryCode,
-                fxRate: fxRate || 1,
-                createdAt: new Date().toISOString()
+                receipt: receipt,
+                notes: {
+                    contestId: contestId.toString(),
+                    userId: userId,
+                    originalINR: baseInINR,
+                    expectedAmount: finalAmount,
+                    currency,
+                    countryCode,
+                    fxRate: fxRate,
+                    createdAt: new Date().toISOString()
+                }
+            });
 
-            }
-        });
+            console.log('Razorpay order created:', order.id);
 
-        await Payment.create({
-            userId: req.user.id,
-            contestId,
-            orderId: order.id,
-            amount: finalAmount,
-            currency,
-            status: 'pending',
-            used: false,
-            metadata: {
-                countryCode,
-                fxRate: fxRate || 1,
-                originalINR: baseInINR
-            }
-        });
+            const payment = await Payment.create({
+                userId,
+                contestId,
+                orderId: order.id,
+                amount: finalAmount,
+                currency,
+                status: 'pending',
+                used: false,
+                metadata: {
+                    countryCode,
+                    fxRate: fxRate,
+                    originalINR: baseInINR,
+                    amountInTargetCurrency: Math.round(amountInTargetCurrency * 100) / 100 // Store rounded value
+                }
+            });
 
+            console.log('Payment record created:', payment._id);
 
-        res.json({
-            orderId: order.id,
-            amount: finalAmount,
-            currency,
-            key: process.env.RAZORPAY_KEY_ID,
-            contestId: contestId.toString()
-        });
+            res.json({
+                orderId: order.id,
+                amount: finalAmount,
+                currency,
+                key: process.env.RAZORPAY_KEY_ID,
+                contestId: contestId.toString()
+            });
+
+        } catch (orderErr) {
+            console.error('Order creation failed:', orderErr);
+            console.error('Razorpay error details:', orderErr.error);
+            throw orderErr;
+        }
 
     } catch (err) {
-        console.error(err);
-        res.status(500).json({ message: 'Failed to create order' });
+        console.error('CREATE ORDER ERROR:', err);
+        console.error('Error message:', err.message);
+        console.error('Error stack:', err.stack);
+        console.error('Contest ID:', contestId);
+        console.error('User ID:', userId);
+        console.error('Error type:', err.constructor.name);
+        console.error('Razorpay error:', err.error);
+
+        res.status(500).json({
+            message: 'Failed to create order',
+            error: process.env.NODE_ENV === 'development' ? err.message : 'Internal server error',
+            razorpayError: process.env.NODE_ENV === 'development' ? err.error : undefined,
+            stack: process.env.NODE_ENV === 'development' ? err.stack : undefined
+        });
     }
 });
-
 
 // POST /api/payments/verify
 router.post('/verify', authMiddleware, async (req, res) => {

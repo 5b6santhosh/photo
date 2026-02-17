@@ -1,6 +1,10 @@
 const mongoose = require('mongoose');
 
 const UserSchema = new mongoose.Schema({
+  _id: {
+    type: String,
+    required: true
+  },
   username: {
     type: String, required: true, unique: true, trim: true
   },
@@ -59,7 +63,10 @@ const UserSchema = new mongoose.Schema({
   }
 
 }, {
-  timestamps: true
+  timestamps: true,
+  autoCreate: true,
+  autoIndex: true
+
 });
 UserSchema.index({ contestsJoined: 1 }); // Find users in a contest
 UserSchema.index({ payments: 1 });       // Find user by payment
