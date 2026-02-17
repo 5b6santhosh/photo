@@ -8,6 +8,7 @@ const ContestEntry = require('../models/ContestEntry');
 const Payment = require('../models/Payment');
 const FileMeta = require('../models/FileMeta');
 const { authMiddleware: authMiddleware } = require('../middleware/auth');
+const Submission = require('../models/Submission');
 
 function formatHighlightPhoto(photo, contestEndDate) {
     if (!photo) return null;
@@ -29,10 +30,11 @@ function formatHighlightPhoto(photo, contestEndDate) {
     };
 }
 
-router.get('/:contestId/details', async (req, res) => {
+router.get('/:contestId/details', authMiddleware, async (req, res) => {
     try {
         const { contestId } = req.params;
-        const userId = req.user?.id || null; 
+        const userId = req.user?.id || null;
+        console.log('Contest details request:', { contestId, userId: userId || 'anonymous' });
 
         // Validate contestId
         if (!contestId || !mongoose.Types.ObjectId.isValid(contestId)) {
@@ -70,6 +72,53 @@ router.get('/:contestId/details', async (req, res) => {
                 .filter(p => p !== null);
         }
 
+        // 2. FETCH USER'S SUBMISSIONS FOR THIS CONTEST (What they actually submitted)
+        let userSubmissions = [];
+        let contestEntry = null;
+
+        if (userId) {
+            // Try ContestEntry first (your current model)
+            const entry = await ContestEntry.findOne({
+                userId: new mongoose.Types.ObjectId(userId),
+                contestId: new mongoose.Types.ObjectId(contestId)
+            }).lean();
+
+            if (entry) {
+                contestEntry = {
+                    id: entry._id.toString(),
+                    status: entry.status,
+                    submittedAt: entry.submittedAt,
+                    photos: entry.photos || [],
+                    videos: entry.videos || [],
+                };
+
+                // Fetch actual photo documents for user's submission
+                if (entry.photos?.length > 0) {
+                    const photoDocs = await FileMeta.find({
+                        _id: { $in: entry.photos }
+                    }).lean();
+
+                    userSubmissions = photoDocs.map(p => formatHighlightPhoto(p, contest.endDate));
+                }
+            }
+
+            // Also check Submission model (used in home route)
+            const submission = await Submission.findOne({
+                userId: new mongoose.Types.ObjectId(userId),
+                contestId: new mongoose.Types.ObjectId(contestId)
+            }).lean();
+
+            if (submission && !contestEntry) {
+                contestEntry = {
+                    id: submission._id.toString(),
+                    status: submission.status || 'submitted',
+                    submittedAt: submission.createdAt || submission.submittedAt,
+                    photos: submission.photos || [submission.fileId].filter(Boolean),
+                    videos: submission.videos || [],
+                };
+            }
+        }
+
         // Payment status (only if authenticated)
         let paymentStatus = null;
         if (userId) {
@@ -91,52 +140,89 @@ router.get('/:contestId/details', async (req, res) => {
             }
         }
 
-        // User's entry (only if authenticated)
-        let contestEntry = null;
-        if (userId) {
-            const entry = await ContestEntry.findOne({ userId, contestId }).lean();
-            if (entry) {
-                contestEntry = {
-                    id: entry._id.toString(),
-                    status: entry.status,
-                    submittedAt: entry.submittedAt,
-                    photos: entry.photos || [],
-                    videos: entry.videos || [],
-                };
-            }
-        }
-
-        // Stats
-        const totalSubmissions = await ContestEntry.countDocuments({
-            contestId,
-            status: { $in: ['submitted', 'approved', 'rejected'] }
+        // // User's entry (only if authenticated)
+        // if (userId) {
+        //     const entry = await ContestEntry.findOne({ userId, contestId }).lean();
+        //     if (entry) {
+        //         contestEntry = {
+        //             id: entry._id.toString(),
+        //             status: entry.status,
+        //             submittedAt: entry.submittedAt,
+        //             photos: entry.photos || [],
+        //             videos: entry.videos || [],
+        //         };
+        //     }
+        // }
+        // 4. STATS - Count from BOTH models to be safe
+        const entryCount = await ContestEntry.countDocuments({
+            contestId: new mongoose.Types.ObjectId(contestId),
+            status: { $in: ['submitted', 'approved', 'rejected', 'pending'] }
         });
 
+        const submissionCount = await Submission.countDocuments({
+            contestId: new mongoose.Types.ObjectId(contestId)
+        });
+
+
+        // Stats
+        const totalSubmissions = Math.max(entryCount, submissionCount) || (entryCount + submissionCount);
+
         const mySubmissions = userId ? await ContestEntry.countDocuments({
-            userId,
-            contestId,
-            status: { $in: ['submitted', 'approved', 'rejected'] }
+            userId: new mongoose.Types.ObjectId(userId),
+            contestId: new mongoose.Types.ObjectId(contestId),
+            status: { $in: ['submitted', 'approved', 'rejected', 'pending'] }
         }) : 0;
 
-        // Status calculation
+        // Status calculation - PRIORITIZE DATES over isOpenForSubmissions for timeLabel consistency
         const now = new Date();
-        const isActive = contest.isOpenForSubmissions &&
-            now >= new Date(contest.startDate) &&
-            now <= new Date(contest.endDate);
-        const isUpcoming = now < new Date(contest.startDate);
-        const isCompleted = now > new Date(contest.endDate);
+        const startDate = new Date(contest.startDate);
+        const endDate = new Date(contest.endDate);
 
-        // Time label
+        // Date-based status (what users see)
+        const dateBasedIsUpcoming = now < startDate;
+        const dateBasedIsCompleted = now > endDate;
+        const dateBasedIsActive = !dateBasedIsUpcoming && !dateBasedIsCompleted;
+
+        // Functional status (can they actually submit?)
+        const isOpenForSubmissions = ['published', 'ongoing'].includes(contest.contestStatus) && dateBasedIsActive;
+        const isActive = dateBasedIsActive && isOpenForSubmissions;
+        const isUpcoming = dateBasedIsUpcoming;
+        const isCompleted = dateBasedIsCompleted || (dateBasedIsActive && !isOpenForSubmissions);
+
+        // Time label - ALWAYS based on dates, not submission status
         let timeLabel = '';
-        if (isActive) {
-            const daysLeft = Math.ceil((new Date(contest.endDate) - now) / (1000 * 60 * 60 * 24));
-            timeLabel = daysLeft === 1 ? '1 day left' : `${daysLeft} days left`;
-        } else if (isUpcoming) {
-            const daysUntil = Math.ceil((new Date(contest.startDate) - now) / (1000 * 60 * 60 * 24));
+        let timeStatus = ''; // 'upcoming', 'active', 'completed' for UI styling
+
+        if (dateBasedIsUpcoming) {
+            const daysUntil = Math.ceil((startDate - now) / (1000 * 60 * 60 * 24));
             timeLabel = daysUntil === 1 ? 'Starts in 1 day' : `Starts in ${daysUntil} days`;
+            timeStatus = 'upcoming';
+        } else if (dateBasedIsActive) {
+            const daysLeft = Math.ceil((endDate - now) / (1000 * 60 * 60 * 24));
+            timeLabel = daysLeft === 0 ? 'Ends today' : daysLeft === 1 ? 'Ends in 1 day' : `Ends in ${daysLeft} days`;
+            timeStatus = 'active';
         } else {
-            timeLabel = 'Ended';
+            const daysAgo = Math.floor((now - endDate) / (1000 * 60 * 60 * 24));
+            timeLabel = daysAgo === 0 ? 'Ended today' : daysAgo === 1 ? 'Ended 1 day ago' : `Ended ${daysAgo} days ago`;
+            timeStatus = 'completed';
         }
+
+        // Override if submissions are closed but contest is date-active
+        // let displayStatus = timeStatus;
+        // let statusBadge = isActive ? 'Active' : (isUpcoming ? 'Upcoming' : 'Completed');
+
+        // // If date says active but submissions are closed, show "Ending Soon" or keep date-based label
+        // if (dateBasedIsActive && !isOpenForSubmissions) {
+        //     statusBadge = 'Closing Soon';
+        // }
+        console.log('Sending response:', {
+            userId,
+            totalSubmissions,
+            mySubmissions,
+            hasParticipated: !!contestEntry || mySubmissions > 0,
+            highlightCount: highlightPhotos.length,
+            userSubmissionCount: userSubmissions.length
+        });
 
         res.json({
             success: true,
@@ -145,21 +231,27 @@ router.get('/:contestId/details', async (req, res) => {
                 title: contest.title,
                 subtitle: contest.subtitle || contest.description,
                 description: contest.description,
-                prizeText: contest.prizeText || `₹${contest.entryFee || 0}`,
+                prizeText: contest.prizeText || (contest.entryFee > 0 ? `₹${contest.entryFee}` : 'Free entry'),
                 entryFee: contest.entryFee || 0,
                 startDate: contest.startDate,
                 endDate: contest.endDate,
-                isActive,
-                isUpcoming,
-                isCompleted,
-                isOpenForSubmissions: contest.isOpenForSubmissions,
-                timeLabel,
+                isActive,           // Can user submit?
+                isUpcoming,         // Before start date?
+                isCompleted,        // After end date or closed?
+                isOpenForSubmissions, // Explicit flag
+                timeLabel,          // Date-based label
+                timeStatus,         // 'upcoming' | 'active' | 'completed'
+                // displayStatus,      // For UI theming
+                // statusBadge,        // Text for badge
                 totalSubmissions,
                 mySubmissions,
-                highlightPhotos, 
-                coverImage: highlightPhotos.length > 0 ? highlightPhotos[0].url : null,
+                highlightPhotos,
+                userSubmissions,
+                coverImage: highlightPhotos.length > 0 ? highlightPhotos[0].url :
+                    (userSubmissions.length > 0 ? userSubmissions[0].url : null),
                 contestEntry,
                 paymentStatus,
+                hasParticipated: !!contestEntry || mySubmissions > 0,
                 category: contest.category,
                 tags: contest.tags || [],
                 rules: contest.rules,

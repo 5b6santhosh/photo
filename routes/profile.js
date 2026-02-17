@@ -44,6 +44,8 @@ router.get('/me', auth, async (req, res) => {
                 email: user.email,
                 bio: user.bio || '',
                 avatarUrl: user.avatarUrl || '',
+                dateOfBirth: user.dateOfBirth || null,
+                gender: user.gender || null,
                 totalPhotos,
                 wins: user.wins || 0,
                 streakDays: user.streakDays || 0,
@@ -119,6 +121,9 @@ router.get('/:userId', optionalAuth, async (req, res) => {
                 firstName: user.firstName,
                 bio: user.bio || '',
                 avatarUrl: user.avatarUrl || '',
+                dateOfBirth: user.dateOfBirth ? new Date(user.dateOfBirth).getFullYear() : null,
+                gender: user.gender || null,
+
                 totalPhotos,
                 wins: user.wins || 0,
                 streakDays: user.streakDays || 0,
@@ -208,6 +213,8 @@ router.get('/:userId/gallery', optionalAuth, async (req, res) => {
                     name: targetUser.name || targetUser.firstName || 'Curator',
                     wins: targetUser.wins || 0,
                     avatarUrl: targetUser.avatarUrl || '',
+                    dateOfBirth: targetUser.dateOfBirth ? new Date(targetUser.dateOfBirth).getFullYear() : null,
+                    gender: targetUser.gender || null,
                     bio: targetUser.bio || '',
                     location: targetUser.location || {
                         city: '',
@@ -300,6 +307,8 @@ router.get('/:userId/gallery', optionalAuth, async (req, res) => {
                 name: targetUser.name || targetUser.firstName || 'Curator',
                 wins: targetUser.wins || 0,
                 avatarUrl: targetUser.avatarUrl || '',
+                dateOfBirth: targetUser.dateOfBirth ? new Date(targetUser.dateOfBirth).getFullYear() : null,
+                gender: targetUser.gender || null,
                 bio: targetUser.bio || '',
                 streakDays: targetUser.streakDays || 0,
                 location: targetUser.location || {
@@ -340,7 +349,8 @@ router.put('/me', auth, async (req, res) => {
             avatarUrl,
             bio,
             username,
-            // Location fields from Flutter app (snake_case or camelCase)
+            dateOfBirth,
+            gender,
             country,
             state,
             city,
@@ -372,6 +382,32 @@ router.put('/me', auth, async (req, res) => {
                 message: 'bio must be a string'
             });
         }
+        if (dateOfBirth !== undefined) {
+            const dob = new Date(dateOfBirth);
+            if (isNaN(dob.getTime())) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'dateOfBirth must be a valid date'
+                });
+            }
+            // Check minimum age (18 years)
+            const minAge = new Date();
+            minAge.setFullYear(minAge.getFullYear() - 18);
+            if (dob > minAge) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'You must be at least 18 years old'
+                });
+            }
+        }
+
+        if (gender !== undefined && !['Male', 'Female', 'Other'].includes(gender)) {
+            return res.status(400).json({
+                success: false,
+                message: 'gender must be Male, Female, or Other'
+            });
+        }
+
 
         // Validate location fields if provided
         // Support both camelCase and snake_case from Flutter
@@ -452,8 +488,10 @@ router.put('/me', auth, async (req, res) => {
         if (username !== undefined) updateFields.username = username.trim().toLowerCase();
         if (bio !== undefined) updateFields.bio = bio.trim();
         if (avatarUrl !== undefined) updateFields.avatarUrl = avatarUrl.trim();
+        if (dateOfBirth !== undefined) updateFields.dateOfBirth = new Date(dateOfBirth);
+        if (gender !== undefined) updateFields.gender = gender;
 
-        if (firstName || avatarUrl || bio) {
+        if (firstName || avatarUrl || bio || dateOfBirth || gender) {
             updateFields.isProfileCompleted = true;
         }
         // Build location update if any location field is provided
@@ -664,7 +702,7 @@ router.put('/me/location', auth, async (req, res) => {
             { $set: updateFields },
             { new: true, runValidators: true }
         )
-            .select('location')
+            .select('location firstName gender dateOfBirth instagram')
             .lean();
 
         if (!updatedUser) {
@@ -677,7 +715,13 @@ router.put('/me/location', auth, async (req, res) => {
         res.json({
             success: true,
             message: 'Location updated successfully',
-            location: updatedUser.location
+            user: {
+                firstName: updatedUser.firstName || '',
+                gender: updatedUser.gender || null,
+                dateOfBirth: updatedUser.dateOfBirth ? new Date(updatedUser.dateOfBirth).getFullYear() : null,
+                instagram: updatedUser.instagram || '',
+                location: updatedUser.location
+            }
         });
     } catch (e) {
         console.error('LOCATION_UPDATE_ERROR', e);

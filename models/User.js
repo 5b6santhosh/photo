@@ -65,9 +65,16 @@ const UserSchema = new mongoose.Schema({
   badgeTier: {
     type: String,
     default: 'newCurator'
-  }
-
-
+  },
+  dateOfBirth: {
+    type: Date,
+    default: null
+  },
+  gender: {
+    type: String,
+    enum: ['Male', 'Female', 'Other'],
+    default: null
+  },
 }, {
   timestamps: true,
 
