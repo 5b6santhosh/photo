@@ -9,6 +9,7 @@ const Payment = require('../models/Payment');
 const FileMeta = require('../models/FileMeta');
 const { authMiddleware: authMiddleware } = require('../middleware/auth');
 const Submission = require('../models/Submission');
+const JudgeDecision = require('../models/JudgeDecision');
 
 function formatHighlightPhoto(photo, contestEndDate) {
     if (!photo) return null;
