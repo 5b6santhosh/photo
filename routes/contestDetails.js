@@ -655,6 +655,12 @@ router.get('/:contestId/overview', authMiddleware, async (req, res) => {
     }
 });
 
+function validateObjectId(id, fieldName = 'id') {
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+        throw new Error(`Invalid ${fieldName}: must be a valid MongoDB ObjectId`);
+    }
+}
+
 // Helper functions
 function getContestStatus(contest, now) {
     if (now < contest.startDate) return 'upcoming';
