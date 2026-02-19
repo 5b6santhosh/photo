@@ -160,11 +160,13 @@ router.post('/create-order', authMiddleware, async (req, res) => {
             });
 
             console.log('Razorpay order created:', order.id);
+            // const generatePaymentId = () => `PAY_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
 
             const payment = await Payment.create({
                 userId,
                 contestId,
                 orderId: order.id,
+                paymentId: order.id,
                 amount: finalAmount,
                 currency,
                 status: 'pending',
@@ -181,6 +183,7 @@ router.post('/create-order', authMiddleware, async (req, res) => {
 
             res.json({
                 orderId: order.id,
+                paymentId: payment.paymentId,
                 amount: finalAmount,
                 currency,
                 key: process.env.RAZORPAY_KEY_ID,
