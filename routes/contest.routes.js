@@ -1,17 +1,21 @@
 // ============================================
-// CONTEST API ROUTES - CORRECTED VERSION
+// CONTEST API ROUTES - 3 PHASE SYSTEM
 // ============================================
 
 const express = require('express');
 const router = express.Router();
 const mongoose = require('mongoose');
 const { upload, handleUploadError } = require('../middleware/upload');
-const { authMiddleware, requireAdmin, requireJudge } = require('../middleware/auth');
+const { authMiddleware, requireAdmin } = require('../middleware/auth');
 const { evaluateMedia } = require('../services/mediaEvaluation.service');
-const { getTopRankedEntries } = require('../services/contestRanking.service');
+const {
+    getPublicWinners,
+    getAdminPreview,
+    selectWinners
+} = require('../services/contestRanking.service');
 const Contest = require('../models/Contest');
 const ContestAppeal = require('../models/ContestAppeal');
-const JudgeDecision = require('../models/JudgeDecision');
+const Submission = require('../models/Submission');
 const fs = require('fs').promises;
 
 // ============================================
@@ -26,22 +30,250 @@ function validateObjectId(id, fieldName = 'id') {
 
 async function validateContest(contestId) {
     validateObjectId(contestId, 'contestId');
-
     const contest = await Contest.findById(contestId).populate('rules');
-
-    if (!contest) {
-        throw new Error('Contest not found');
-    }
-
-    if (!contest.rules) {
-        throw new Error('Contest rules not configured');
-    }
-
+    if (!contest) throw new Error('Contest not found');
+    if (!contest.rules) throw new Error('Contest rules not configured');
     return contest;
 }
 
 // ============================================
-// MEDIA EVALUATION ENDPOINT
+// MY CONTESTS
+// ============================================
+
+router.get('/my', authMiddleware, async (req, res) => {
+    try {
+        const userId = req.user.id;
+
+        const submissions = await Submission.find({ userId })
+            .populate({
+                path: 'contestId',
+                populate: { path: 'rules', select: 'title description startDate endDate' }
+            })
+            .populate('fileId', 'thumbnailUrl path')
+            .sort({ createdAt: -1 })
+            .lean();
+
+        const contestMap = new Map();
+        const now = new Date();
+
+        for (const sub of submissions) {
+            const c = sub.contestId;
+            if (!c) continue;
+
+            const endDate = new Date(c.endDate);
+            const phase2Start = new Date(endDate);
+            phase2Start.setDate(phase2Start.getDate() + 1);
+            const phase3Start = new Date(endDate);
+            phase3Start.setDate(phase3Start.getDate() + 2);
+
+            let status = 'upcoming';
+            if (now >= new Date(c.startDate) && now <= endDate) {
+                status = 'active';
+            } else if (now > endDate) {
+                status = now >= phase3Start ? 'completed' : 'judging';
+            }
+
+            let placement = 'participant';
+            if (sub.status === 'winner') placement = 'winner';
+            else if (sub.status === 'shortlisted') placement = 'finalist';
+
+            const key = c._id.toString();
+            if (!contestMap.has(key)) {
+                contestMap.set(key, {
+                    id: c._id,
+                    title: c.rules?.title || 'Untitled Contest',
+                    subtitle: c.rules?.description || '',
+                    status,
+                    phase: now >= phase3Start ? 3 : (now >= phase2Start ? 2 : 1),
+                    myEntries: 0,
+                    placement: 'participant',
+                    endDate: c.endDate,
+                    phase3Start: phase3Start.toISOString(),
+                    hasHighlights: now >= phase3Start,
+                    submissions: []
+                });
+            }
+
+            const entry = contestMap.get(key);
+            entry.myEntries++;
+            entry.submissions.push({
+                id: sub._id,
+                status: sub.status,
+                verdict: sub.verdict,
+                thumbnail: sub.fileId?.thumbnailUrl || sub.fileId?.path
+            });
+
+            if (
+                placement === 'winner' ||
+                (placement === 'finalist' && entry.placement === 'participant')
+            ) {
+                entry.placement = placement;
+            }
+        }
+
+        res.json({ success: true, contests: Array.from(contestMap.values()) });
+
+    } catch (error) {
+        console.error('Get my contests error:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// ============================================
+// PUBLIC WINNERS  (Phase 3 - all authenticated users)
+// ============================================
+
+router.get('/:contestId/winners', authMiddleware, async (req, res) => {
+    try {
+        const { contestId } = req.params;
+        const limit = Math.min(Number(req.query.limit) || 10, 30);
+
+        validateObjectId(contestId, 'contestId');
+
+        const result = await getPublicWinners({ contestId, limit });
+        res.json({ success: true, ...result });
+
+    } catch (error) {
+        console.error('Get winners error:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// ============================================
+// ADMIN PREVIEW  (Phase 1 & 2 - Admin/Owner only)
+// ============================================
+
+router.get('/:contestId/admin-preview',
+    authMiddleware,
+    requireAdmin,
+    async (req, res) => {
+        try {
+            const { contestId } = req.params;
+            const adminId = req.user.id;
+
+            validateObjectId(contestId, 'contestId');
+
+            const result = await getAdminPreview({ contestId, adminId });
+            res.json({ success: true, ...result });
+
+        } catch (error) {
+            console.error('Admin preview error:', error);
+            res.status(500).json({ success: false, error: error.message });
+        }
+    }
+);
+
+// ============================================
+// ADMIN SELECT WINNERS  (Phase 2 only)
+// ============================================
+
+router.post('/:contestId/select-winners',
+    authMiddleware,
+    requireAdmin,
+    async (req, res) => {
+        try {
+            const { contestId } = req.params;
+            const { selections } = req.body; // [{ entryId, position, overrideReason }]
+            const adminId = req.user.id;
+
+            validateObjectId(contestId, 'contestId');
+
+            //  Guard: contest must exist
+            const contest = await Contest.findById(contestId);
+            if (!contest) {
+                return res.status(404).json({ success: false, error: 'Contest not found' });
+            }
+
+            //  Guard: must be Phase 2
+            const now = new Date();
+            const phase2Start = new Date(contest.endDate);
+            phase2Start.setDate(phase2Start.getDate() + 1);
+            const phase3Start = new Date(contest.endDate);
+            phase3Start.setDate(phase3Start.getDate() + 2);
+
+            if (now < phase2Start || now >= phase3Start) {
+                return res.status(403).json({
+                    success: false,
+                    error: 'Winner selection is only allowed during Phase 2 (+1 day after contest end)'
+                });
+            }
+
+            //  Guard: selections array must exist and be non-empty
+            if (!Array.isArray(selections) || selections.length === 0) {
+                return res.status(400).json({
+                    success: false,
+                    error: 'selections array is required and must not be empty'
+                });
+            }
+
+            //  FIX #4: Cap to 30 selections (per spec: picked from top 30)
+            if (selections.length > 30) {
+                return res.status(400).json({
+                    success: false,
+                    error: 'Cannot select more than 30 winners'
+                });
+            }
+
+            //  FIX #6: Validate each entryId before processing
+            for (const sel of selections) {
+                if (!sel.entryId) {
+                    return res.status(400).json({
+                        success: false,
+                        error: 'Each selection must include an entryId'
+                    });
+                }
+                if (!mongoose.Types.ObjectId.isValid(sel.entryId)) {
+                    return res.status(400).json({
+                        success: false,
+                        error: `Invalid entryId: ${sel.entryId}`
+                    });
+                }
+            }
+
+            // Enrich selections with the winner's userId from Submission
+            const enrichedSelections = await Promise.all(
+                selections.map(async (sel) => {
+                    const entry = await Submission.findById(sel.entryId)
+                        .select('userId')
+                        .lean();
+
+                    //  FIX #6: Warn if entry not found rather than silently storing undefined
+                    if (!entry) {
+                        throw new Error(`Submission not found for entryId: ${sel.entryId}`);
+                    }
+
+                    return { ...sel, userId: entry.userId };
+                })
+            );
+
+            const result = await selectWinners({
+                contestId,
+                selections: enrichedSelections,
+                adminId
+            });
+
+            // Mark winning / shortlisted submissions
+            for (const sel of selections) {
+                await Submission.findByIdAndUpdate(sel.entryId, {
+                    status: sel.position === 1 ? 'winner' : 'shortlisted'
+                });
+            }
+
+            res.json({
+                success: true,
+                message: 'Winners selected successfully',
+                ...result
+            });
+
+        } catch (error) {
+            console.error('Select winners error:', error);
+            res.status(500).json({ success: false, error: error.message });
+        }
+    }
+);
+
+// ============================================
+// MEDIA EVALUATION  (entry submission)
 // ============================================
 
 router.post('/evaluate',
@@ -52,30 +284,25 @@ router.post('/evaluate',
         let uploadedFile = null;
 
         try {
-            // Validate file upload
             if (!req.file) {
-                return res.status(400).json({
-                    success: false,
-                    error: 'No media file uploaded'
-                });
+                return res.status(400).json({ success: false, error: 'No media file uploaded' });
             }
 
             uploadedFile = req.file.path;
-
-            // Validate request body
             const { contestId, entryId } = req.body;
 
             if (!contestId) {
-                return res.status(400).json({
-                    success: false,
-                    error: 'contestId is required'
-                });
+                return res.status(400).json({ success: false, error: 'contestId is required' });
             }
 
-            // Validate and load contest
             const contest = await validateContest(contestId);
 
-            // Build contest rules object
+            // Contest must be in active Phase 1 (before end date)
+            const now = new Date();
+            if (now < contest.startDate || now > contest.endDate) {
+                return res.status(403).json({ success: false, error: 'Contest is not currently active' });
+            }
+
             const contestRules = {
                 contestId: contest._id,
                 entryId: entryId || new mongoose.Types.ObjectId(),
@@ -93,188 +320,98 @@ router.post('/evaluate',
                 autoRejectNSFW: contest.rules.autoRejectNSFW
             };
 
-            // Run evaluation
             console.log(`📊 Evaluating media for contest ${contestId}...`);
-            const result = await evaluateMedia(
-                req.file.path,
-                req.file.mimetype,
-                contestRules
-            );
+            const result = await evaluateMedia(req.file.path, req.file.mimetype, contestRules);
 
-            // Return result
-            res.json({
-                success: result.success,
-                ...result
-            });
+            // Persist submission for non-error verdicts
+            if (result.verdict !== 'error') {
+                await Submission.create({
+                    contestId,
+                    userId: req.user.id,
+                    fileId: result.entryId || contestRules.entryId,
+                    status: result.verdict === 'approved' ? 'submitted' : result.verdict,
+                    verdict: result.verdict,
+                    aiScore: result.score,
+                    metadata: result.metadata
+                });
+            }
+
+            res.json({ success: result.success, ...result });
 
         } catch (error) {
             console.error('Evaluation endpoint error:', error);
-            res.status(500).json({
-                success: false,
-                error: error.message || 'Evaluation failed'
-            });
+            res.status(500).json({ success: false, error: error.message || 'Evaluation failed' });
         } finally {
-            // Cleanup uploaded file
             if (uploadedFile) {
                 try {
                     await fs.access(uploadedFile);
                     await fs.unlink(uploadedFile);
-                } catch (err) {
-                    // File already deleted or doesn't exist
-                }
+                } catch (_) { /* already deleted */ }
             }
         }
     }
 );
 
 // ============================================
-// CONTEST WINNERS ENDPOINT
+// APPEAL SUBMISSION
 // ============================================
 
-router.get('/contests/:contestId/winners',
-    authMiddleware,
-    async (req, res) => {
-        try {
-            const { contestId } = req.params;
-            validateObjectId(contestId, 'contestId');
+router.post('/appeals', authMiddleware, async (req, res) => {
+    try {
+        const { contestId, entryId, appealReason, explanation } = req.body;
 
-            const limit = Math.min(Number(req.query.limit) || 3, 20); // Max 20
-
-            // 1. Check for judge-selected winners first
-            const judgeWinners = await JudgeDecision.find({
-                contestId,
-                finalDecision: 'winner'
-            })
-                .populate('entryId', 'title mediaUrl userId')
-                .populate('userId', 'name email')
-                .limit(limit)
-                .lean();
-
-            if (judgeWinners.length > 0) {
-                return res.json({
-                    success: true,
-                    winners: judgeWinners.map((w, idx) => ({
-                        rank: idx + 1,
-                        entryId: w.entryId,
-                        userId: w.userId,
-                        aiScore: w.aiScore,
-                        aiRank: w.aiRank,
-                        decision: w.finalDecision,
-                        overrideReason: w.overrideReason
-                    })),
-                    source: 'judge',
-                    count: judgeWinners.length
-                });
-            }
-
-            // 2. Fallback to AI-ranked winners
-            const aiWinners = await getTopRankedEntries({
-                contestId,
-                limit
-            });
-
-            res.json({
-                success: true,
-                winners: aiWinners,
-                source: 'ai',
-                count: aiWinners.length
-            });
-
-        } catch (error) {
-            console.error('Get winners error:', error);
-            res.status(500).json({
+        if (!contestId || !entryId || !appealReason) {
+            return res.status(400).json({
                 success: false,
-                error: error.message
+                error: 'contestId, entryId, and appealReason are required'
             });
         }
-    }
-);
 
-// ============================================
-// APPEAL SUBMISSION ENDPOINT
-// ============================================
+        validateObjectId(contestId, 'contestId');
+        validateObjectId(entryId, 'entryId');
 
-router.post('/appeals',
-    authMiddleware,
-    async (req, res) => {
-        try {
-            const { contestId, entryId, appealReason, explanation } = req.body;
-
-            // Validation
-            if (!contestId || !entryId || !appealReason) {
-                return res.status(400).json({
-                    success: false,
-                    error: 'contestId, entryId, and appealReason are required'
-                });
-            }
-
-            validateObjectId(contestId, 'contestId');
-            validateObjectId(entryId, 'entryId');
-
-            if (appealReason.length < 10 || appealReason.length > 1000) {
-                return res.status(400).json({
-                    success: false,
-                    error: 'Appeal reason must be between 10 and 1000 characters'
-                });
-            }
-
-            // Check if appeal already exists
-            const existingAppeal = await ContestAppeal.findOne({
-                entryId,
-                userId: req.user.id
-            });
-
-            if (existingAppeal) {
-                return res.status(400).json({
-                    success: false,
-                    error: 'An appeal for this entry already exists',
-                    existingAppeal: {
-                        status: existingAppeal.status,
-                        createdAt: existingAppeal.createdAt
-                    }
-                });
-            }
-
-            // Create appeal
-            const appeal = await ContestAppeal.create({
-                contestId,
-                entryId,
-                userId: req.user.id,
-                originalVerdict: explanation?.verdict || 'rejected',
-                appealReason,
-                aiExplanationSnapshot: explanation || {}
-            });
-
-            res.json({
-                success: true,
-                message: 'Appeal submitted successfully',
-                appeal: {
-                    id: appeal._id,
-                    status: appeal.status,
-                    createdAt: appeal.createdAt
-                }
-            });
-
-        } catch (error) {
-            console.error('Appeal submission error:', error);
-
-            if (error.code === 11000) { // Duplicate key error
-                return res.status(400).json({
-                    success: false,
-                    error: 'An appeal for this entry already exists'
-                });
-            }
-
-            res.status(500).json({
+        if (appealReason.length < 10 || appealReason.length > 1000) {
+            return res.status(400).json({
                 success: false,
-                error: error.message
+                error: 'Appeal reason must be between 10 and 1000 characters'
             });
         }
+
+        const existingAppeal = await ContestAppeal.findOne({ entryId, userId: req.user.id });
+        if (existingAppeal) {
+            return res.status(400).json({
+                success: false,
+                error: 'An appeal for this entry already exists',
+                existingAppeal: { status: existingAppeal.status, createdAt: existingAppeal.createdAt }
+            });
+        }
+
+        const appeal = await ContestAppeal.create({
+            contestId,
+            entryId,
+            userId: req.user.id,
+            originalVerdict: explanation?.verdict || 'rejected',
+            appealReason,
+            aiExplanationSnapshot: explanation || {}
+        });
+
+        res.json({
+            success: true,
+            message: 'Appeal submitted successfully',
+            appeal: { id: appeal._id, status: appeal.status, createdAt: appeal.createdAt }
+        });
+
+    } catch (error) {
+        console.error('Appeal submission error:', error);
+        if (error.code === 11000) {
+            return res.status(400).json({ success: false, error: 'An appeal for this entry already exists' });
+        }
+        res.status(500).json({ success: false, error: error.message });
     }
-);
+});
 
 // ============================================
-// APPEAL REVIEW ENDPOINT (ADMIN ONLY)
+// APPEAL REVIEW  (Admin only)
 // ============================================
 
 router.post('/admin/appeals/:appealId/review',
@@ -287,7 +424,6 @@ router.post('/admin/appeals/:appealId/review',
 
             validateObjectId(appealId, 'appealId');
 
-            // Validation
             if (!status || !['accepted', 'rejected'].includes(status)) {
                 return res.status(400).json({
                     success: false,
@@ -295,29 +431,19 @@ router.post('/admin/appeals/:appealId/review',
                 });
             }
 
-            // Find appeal
             const appeal = await ContestAppeal.findById(appealId);
-
             if (!appeal) {
-                return res.status(404).json({
-                    success: false,
-                    error: 'Appeal not found'
-                });
+                return res.status(404).json({ success: false, error: 'Appeal not found' });
             }
 
             if (appeal.status !== 'pending') {
                 return res.status(400).json({
                     success: false,
                     error: `Appeal already ${appeal.status}`,
-                    appeal: {
-                        status: appeal.status,
-                        reviewedBy: appeal.reviewedBy,
-                        reviewerNotes: appeal.reviewerNotes
-                    }
+                    appeal: { status: appeal.status, reviewedBy: appeal.reviewedBy, reviewerNotes: appeal.reviewerNotes }
                 });
             }
 
-            // Update appeal
             appeal.status = status;
             appeal.reviewerNotes = reviewerNotes || '';
             appeal.reviewedBy = req.user.id;
@@ -337,21 +463,17 @@ router.post('/admin/appeals/:appealId/review',
 
         } catch (error) {
             console.error('Appeal review error:', error);
-            res.status(500).json({
-                success: false,
-                error: error.message
-            });
+            res.status(500).json({ success: false, error: error.message });
         }
     }
 );
 
 // ============================================
-// HEALTH CHECK ENDPOINT
+// HEALTH CHECK
 // ============================================
 
 router.get('/health', (req, res) => {
     const CONFIG = require('../config');
-
     res.json({
         status: 'ok',
         timestamp: new Date().toISOString(),

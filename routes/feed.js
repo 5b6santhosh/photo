@@ -10,13 +10,12 @@ router.get('/', async (req, res) => {
     try {
         const userId = req.user ? req.user.id : null;
 
-        // Fetch files + populate user
         const files = await FileMeta.find({
             archived: false,
             visibility: 'public'
         })
-            .populate('createdBy', 'name avatarUrl') //  Get user info safely
-            .populate('event', 'title startDate endDate')
+            .populate('createdBy', 'name avatarUrl')
+            .populate('event', 'title startDate endDate createdBy') //  Added createdBy
             .sort({ uploadedAt: -1 })
             .limit(100)
             .lean();
@@ -25,11 +24,20 @@ router.get('/', async (req, res) => {
             ? await Following.find({ follower: userId }).distinct('following')
             : [];
 
+        //  Get actual like counts
+        const fileIds = files.map(f => f._id.toString());
+        const likeCounts = await Like.aggregate([
+            { $match: { fileId: { $in: fileIds.map(id => new ObjectId(id)) } } },
+            { $group: { _id: "$fileId", count: { $sum: 1 } } }
+        ]).then(results =>
+            results.reduce((acc, curr) => ({ ...acc, [curr._id.toString()]: curr.count }), {})
+        );
 
         const feed = files.map(f => {
-            const isVideo = f.mimeType.startsWith('video/');
-            // 🔹 Event status
-            const eventId = f.event?._id?.toString();
+            const isVideo = f.mimeType?.startsWith('video/');
+            const fileId = f._id.toString();
+
+            // Event status logic
             let eventStatus = 'general';
             if (f.event) {
                 const now = new Date();
@@ -38,28 +46,28 @@ router.get('/', async (req, res) => {
                 else eventStatus = 'active';
             }
 
-            // 🔹 Is from a user I follow?
-            const isFromFollowing = followingUserIds.includes(f.createdBy?._id.toString());
+            const isFromFollowing = followingUserIds.includes(f.createdBy?._id?.toString());
 
-            // 🔹 Is my own event?
+            //  Now works because we populated event.createdBy
             const isMyEvent = f.event?.createdBy?.toString() === userId;
 
             return {
-                id: f._id.toString(),
+                id: fileId,
                 mediaType: isVideo ? 'reel' : 'image',
                 photo: {
-                    id: f._id.toString(),
+                    id: fileId,
                     title: f.title || 'Untitled',
                     imageUrl: isVideo ? f.thumbnailUrl : f.path,
                     category: f.category || 'other',
-                }, videoUrl: isVideo ? f.path : null, //  Same URL works for Cloudinary video
+                },
+                videoUrl: isVideo ? f.path : null,
                 eventTitle: f.event?.title || 'General',
-                eventStatus, //  'active', 'upcoming', 'completed', 'general'
-                isMyEvent,   //  for "My Events" filter
-                isFromFollowing, //  for "Following" tab
-                likes: f.likesCount || 0,
-                comments: f.commentsCount || 0,
-                isLiked: false, // We'll set this below if userId exists
+                eventStatus,      // 'active', 'upcoming', 'completed', 'general'
+                isMyEvent,        //  Now works
+                isFromFollowing,  // for "Following" tab
+                likes: likeCounts[fileId] || 0,  // Actual count
+                comments: f.commentsCount || 0,  // Or populate similarly
+                isLiked: false,   // Set below if userId exists
                 user: {
                     id: f.createdBy?._id?.toString() || null,
                     name: f.createdBy?.name || "Anonymous",
@@ -68,7 +76,6 @@ router.get('/', async (req, res) => {
             };
         });
 
-        // Only check likes if user is logged in
         if (userId) {
             const likedFileIds = await Like.find({ userId })
                 .distinct('fileId')
@@ -89,5 +96,4 @@ router.get('/', async (req, res) => {
         res.status(500).json({ status: "error", message: 'Feed error' });
     }
 });
-
 module.exports = router;

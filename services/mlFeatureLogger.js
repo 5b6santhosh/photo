@@ -11,13 +11,47 @@ async function saveMLFeatures({
     phase1,
     aiInsights,
     verdict,
-    finalScore
+    finalScore,
+    perceptualHash,
+    brightness,
+    entropy,
+    duplicateOf = null
+
 }) {
     try {
         const meta = phase1.metadata;
 
         const width = meta.width || 0;
         const height = meta.height || 0;
+
+        //  ADD THIS BLOCK: Calculate color dominance
+        let colorDominance = { red: 0, green: 0, blue: 0 };
+        if (phase1.thumbnailPath) {
+            try {
+                const sharp = require('sharp'); // Add at top of file if not there
+                const { data, info } = await sharp(phase1.thumbnailPath)
+                    .resize(100, 100, { fit: 'inside' })
+                    .raw()
+                    .toBuffer({ resolveWithObject: true });
+
+                let r = 0, g = 0, b = 0, total = 0;
+                for (let i = 0; i < data.length; i += 3) {
+                    r += data[i];
+                    g += data[i + 1];
+                    b += data[i + 2];
+                    total++;
+                }
+
+                const sum = r + g + b;
+                colorDominance = {
+                    red: sum > 0 ? Number((r / sum).toFixed(3)) : 0,
+                    green: sum > 0 ? Number((g / sum).toFixed(3)) : 0,
+                    blue: sum > 0 ? Number((b / sum).toFixed(3)) : 0
+                };
+            } catch (err) {
+                console.warn('Color analysis failed:', err.message);
+            }
+        }
 
         const featureDoc = {
             contestId,
@@ -34,21 +68,20 @@ async function saveMLFeatures({
                 aspectRatio: safeDivide(width, height),
                 megapixels: safeDivide(width * height, 1_000_000),
 
-                // Image statistics (not scores)
-                sharpness: aiInsights?.sharpness ?? null,
-                brightness: phase1.metadata?.brightness ?? null,
+                sharpness: aiInsights?.sharpness ?? phase1.metadata?.sharpness ?? null,
+                brightness: brightness ?? phase1.metadata?.brightness ?? null,
                 contrast: aiInsights?.contrast ?? null,
-                entropy: phase1.metadata?.entropy ?? null,
+                entropy: entropy ?? phase1.metadata?.entropy ?? null,
 
-                // Safety
                 skinExposureRatio: Number((phase1.skinRatio ?? 0).toFixed(2)),
                 hasAudio: Boolean(meta.hasAudio),
 
-                // Video only
                 duration: meta.duration ?? 0,
                 fps: meta.fps ?? 0,
                 bitrate: meta.bitrate ?? 0,
-                perceptualHash: phase1.features?.perceptualHash ?? null
+                perceptualHash: perceptualHash ?? null,
+
+                colorDominance
             },
 
             // ======================
@@ -71,6 +104,7 @@ async function saveMLFeatures({
             },
 
             verdict,
+            duplicateOf,
             modelVersion: 'phase1+phase2'
         };
 

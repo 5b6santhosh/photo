@@ -39,7 +39,7 @@ const MLFeatureLogSchema = new mongoose.Schema({
         megapixels: Number,
 
         // Image quality
-        sharpness: Number,
+        sharpness: Number,       
         brightness: Number,
         contrast: Number,
         entropy: Number,
@@ -56,6 +56,12 @@ const MLFeatureLogSchema = new mongoose.Schema({
         perceptualHash: {
             type: String,
             index: true
+        },
+
+        colorDominance: {
+            red: { type: Number, default: 0 },      // 0-1 percentage
+            green: { type: Number, default: 0 },    // 0-1 percentage  
+            blue: { type: Number, default: 0 }     // 0-1 percentage
         }
 
     },
@@ -82,6 +88,13 @@ const MLFeatureLogSchema = new mongoose.Schema({
     verdict: {
         type: String,
         enum: ['approved', 'review', 'rejected'],
+        index: true
+    },
+
+    duplicateOf: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'MLFeatureLog',
+        default: null,
         index: true
     },
 

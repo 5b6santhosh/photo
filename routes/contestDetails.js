@@ -459,4 +459,275 @@ router.post('/:contestId/submit', authMiddleware, async (req, res) => {
     }
 });
 
+// NEW ROUTE: Add to routes/contest.js
+router.get('/my', authMiddleware, async (req, res) => {
+    try {
+        const userId = req.user.id;
+
+        // Get all submissions by user with contest data
+        const submissions = await Submission.find({ userId })
+            .populate({
+                path: 'contestId',
+                populate: { path: 'rules', select: 'title description' }
+            })
+            .populate('fileId', 'thumbnailUrl path')
+            .sort({ createdAt: -1 })
+            .lean();
+
+        // Group by contest to get unique contests user joined
+        const contestMap = new Map();
+
+        for (const sub of submissions) {
+            const c = sub.contestId;
+            if (!c) continue;
+
+            const now = new Date();
+            let status = 'upcoming';
+            if (now >= c.startDate && now <= c.endDate) status = 'active';
+            else if (now > c.endDate) status = 'completed';
+
+            // Determine placement
+            let placement = 'participant';
+            if (sub.status === 'winner') placement = 'winner';
+            else if (sub.status === 'shortlisted') placement = 'finalist';
+
+            if (!contestMap.has(c._id.toString())) {
+                contestMap.set(c._id.toString(), {
+                    id: c._id,
+                    title: c.rules?.title || c.title || 'Untitled Contest',
+                    subtitle: c.rules?.description || c.description || '',
+                    status,
+                    myEntries: 0,
+                    placement: 'participant', // Will upgrade if better found
+                    endDate: c.endDate,
+                    hasHighlights: status === 'completed', // Winners announced
+                    submissions: []
+                });
+            }
+
+            const entry = contestMap.get(c._id.toString());
+            entry.myEntries++;
+            entry.submissions.push({
+                id: sub._id,
+                status: sub.status,
+                thumbnail: sub.fileId?.thumbnailUrl || sub.fileId?.path,
+                verdict: sub.verdict
+            });
+
+            // Upgrade placement if this submission has better status
+            if (placement === 'winner' ||
+                (placement === 'finalist' && entry.placement === 'participant')) {
+                entry.placement = placement;
+            }
+        }
+
+        res.json({
+            success: true,
+            contests: Array.from(contestMap.values())
+        });
+
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// routes/contest.js - Add this route
+router.get('/:contestId/overview', authMiddleware, async (req, res) => {
+    try {
+        const { contestId } = req.params;
+        const userId = req.user.id;
+
+        validateObjectId(contestId, 'contestId');
+
+        const contest = await Contest.findById(contestId)
+            .populate('rules', 'title description prizeDescription theme')
+            .lean();
+
+        if (!contest) {
+            return res.status(404).json({ success: false, error: 'Contest not found' });
+        }
+
+        // Get user's submissions for this contest
+        const mySubmissions = await Submission.find({
+            contestId,
+            userId
+        })
+            .populate('fileId', 'thumbnailUrl path title')
+            .sort({ createdAt: -1 })
+            .lean();
+
+        // Get total entry count
+        const totalEntries = await Submission.countDocuments({ contestId });
+
+        // Determine user's placement
+        const mySubmissionIds = mySubmissions.map(s => s._id.toString());
+        const mySubmissionIdSet = new Set(mySubmissionIds);
+        const judgeDecision = await JudgeDecision.findOne({
+            contestId,
+            entryId: { $in: mySubmissionIds },
+            finalDecision: 'winner'
+        }).lean();
+
+        let placement = 'participant';
+        let placementPosition = null;
+
+        if (judgeDecision) {
+            placement = judgeDecision.position === 1 ? 'winner' : 'finalist';
+            placementPosition = judgeDecision.position;
+        }
+
+        // Check if results are visible (Phase 3)
+        const now = new Date();
+        const phase3Start = new Date(contest.endDate);
+        phase3Start.setDate(phase3Start.getDate() + 2);
+        const resultsVisible = now >= phase3Start;
+
+        let highlights = [];
+        if (resultsVisible) {
+            const topEntries = await getTopEntriesForReview({ contestId, limit: 30 });
+            highlights = await Promise.all(
+                topEntries.qualified.slice(0, 10).map(async (e) => {
+                    const sub = await Submission.findById(e.entryId)
+                        .populate('fileId', 'thumbnailUrl')
+                        .lean();
+
+                    return {
+                        entryId: e.entryId,
+                        thumbnailUrl: sub?.fileId?.thumbnailUrl,
+                        rank: e.preliminaryRank,
+                        aiScore: e.scores.final,
+                        isMyEntry: e.userId?.toString() === userId
+                    };
+                })
+            );
+        }
+
+        // Build timeline based on user's journey
+        const timeline = buildUserTimeline(mySubmissions, judgeDecision);
+
+        // Calculate time label
+        const timeLabel = calculateTimeLabel(contest, now);
+
+        res.json({
+            success: true,
+            contest: {
+                id: contest._id,
+                title: contest.rules?.title || contest.title,
+                subtitle: contest.rules?.description || '',
+                prizeText: contest.rules?.prizeDescription || 'Win curated badge + spotlight',
+                status: getContestStatus(contest, now),
+                theme: contest.rules?.theme,
+
+                // Stats
+                totalEntries,
+                myShots: mySubmissions.length,
+                placement,
+                placementPosition,
+
+                // Dates
+                startDate: contest.startDate,
+                endDate: contest.endDate,
+                phase3Start: phase3Start.toISOString(),
+                resultsVisible,
+                timeLabel,
+
+                // User's submissions
+                mySubmissions: mySubmissions.map(s => ({
+                    id: s._id,
+                    thumbnail: s.fileId?.thumbnailUrl,
+                    status: s.status,
+                    verdict: s.verdict,
+                    aiScore: s.aiScore,
+                    submittedAt: s.createdAt
+                })),
+
+                // Highlights for reel
+                highlights,
+
+                // Journey timeline
+                timeline
+            }
+        });
+
+    } catch (error) {
+        console.error('Get contest details error:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// Helper functions
+function getContestStatus(contest, now) {
+    if (now < contest.startDate) return 'upcoming';
+    if (now <= contest.endDate) return 'active';
+    return 'completed';
+}
+
+function calculateTimeLabel(contest, now) {
+    const end = new Date(contest.endDate);
+    const diff = end - now;
+
+    if (diff > 0) {
+        const days = Math.ceil(diff / (1000 * 60 * 60 * 24));
+        return days === 1 ? 'Ends tomorrow' : `${days} days left`;
+    }
+
+    const phase3 = new Date(end);
+    phase3.setDate(phase3.getDate() + 2);
+    const resultsDiff = phase3 - now;
+
+    if (resultsDiff > 0) {
+        const hours = Math.ceil(resultsDiff / (1000 * 60 * 60));
+        return `Results in ${hours}h`;
+    }
+
+    return 'Results announced';
+}
+
+function buildUserTimeline(submissions, judgeDecision) {
+    const timeline = [];
+
+    if (submissions.length > 0) {
+        timeline.push({
+            step: 'joined',
+            label: 'Joined contest',
+            description: `You added your first shot on ${submissions[0].createdAt.toLocaleDateString()}`,
+            completed: true,
+            timestamp: submissions[0].createdAt
+        });
+
+        const shortlisted = submissions.filter(s => s.status === 'shortlisted' || s.status === 'winner');
+        if (shortlisted.length > 0) {
+            timeline.push({
+                step: 'shortlisted',
+                label: 'Curated in highlights',
+                description: `${shortlisted.length} of your shots were shortlisted for the reel`,
+                completed: true,
+                timestamp: shortlisted[0].createdAt
+            });
+        }
+
+        if (judgeDecision) {
+            timeline.push({
+                step: 'results',
+                label: judgeDecision.position === 1 ? 'You won!' : 'Finalist placement',
+                description: judgeDecision.position === 1
+                    ? 'Congratulations! You won this contest'
+                    : `You placed #${judgeDecision.position} in this contest`,
+                completed: true,
+                timestamp: judgeDecision.selectedAt
+            });
+        } else {
+            timeline.push({
+                step: 'results',
+                label: 'Results pending',
+                description: 'Badges and placements will update automatically',
+                completed: false,
+                timestamp: null
+            });
+        }
+    }
+
+    return timeline;
+}
+
 module.exports = router;
