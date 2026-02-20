@@ -36,6 +36,16 @@ const APP_CONFIG = {
     enablePhase2: process.env.ENABLE_PHASE2 !== 'false', // true by default
     huggingFaceToken: process.env.HF_TOKEN,
 
+        nsfwModel: 'Falconsai/nsfw_image_detection',
+    // Alternative: 'michellejieli/nsfw_image_detection'
+    
+    themeModel: 'openai/clip-vit-large-patch14',
+    // Alternative: 'sentence-transformers/clip-ViT-B-32'
+    
+    // Graceful degradation
+    skipPhase2OnError: true,
+
+
     // Thresholds
     phase1Threshold: Number(process.env.PHASE1_THRESHOLD) || 65,
     nsfwThreshold: Number(process.env.NSFW_THRESHOLD) || 0.7,
