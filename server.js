@@ -10,6 +10,7 @@ const cors = require('cors');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const path = require('path');
+const axios = require('axios');
 
 const app = express();
 
@@ -61,6 +62,27 @@ const evaluationLimiter = rateLimit({
   legacyHeaders: false,
   skip: (req) => process.env.NODE_ENV === 'development' // Skip in dev
 });
+
+async function warmupModels() {
+  const headers = {
+    'Authorization': `Bearer ${process.env.HF_TOKEN}`,
+    'Content-Type': 'application/octet-stream'
+  };
+  const dummyBuffer = Buffer.alloc(100);
+
+  console.log('🔥 Warming up HuggingFace models...');
+  try {
+    await axios.post(
+      'https://api-inference.huggingface.co/models/Falconsai/nsfw_image_detection',
+      dummyBuffer,
+      { headers, timeout: 60000 }
+    );
+    console.log('✅ NSFW model warmed up');
+  } catch (_) {
+    console.warn('⚠ NSFW warmup failed (model may still be cold)');
+  }
+}
+
 
 // Rate limiter for appeals
 const appealsLimiter = rateLimit({
@@ -240,6 +262,10 @@ mongoose
   .then(() => {
     console.log(' MongoDB connected successfully');
     console.log(` Database: ${mongoose.connection.name}`);
+    if (process.env.HF_TOKEN && process.env.ENABLE_PHASE2 !== 'false') {
+      warmupModels();
+    }
+
   })
   .catch((err) => {
     console.error(' MongoDB connection FAILED:', err.message);

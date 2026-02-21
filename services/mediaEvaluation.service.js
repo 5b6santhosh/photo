@@ -436,6 +436,21 @@ async function detectSkinTones(imagePath) {
 // AI CHECKS  (Phase 2)
 // ============================================
 
+async function hfRequest(url, data, headers, retries = 3) {
+    for (let i = 0; i < retries; i++) {
+        try {
+            return await axios.post(url, data, { headers, timeout: 30000 });
+        } catch (err) {
+            if (err.response?.status === 503 && i < retries - 1) {
+                console.warn(`⚠ HF 503, retrying (${i + 1}/${retries})...`);
+                await new Promise(r => setTimeout(r, 5000 * (i + 1)));
+                continue;
+            }
+            throw err;
+        }
+    }
+}
+
 async function checkNSFW(imagePath) {
     if (!CONFIG.huggingFaceToken) {
         console.warn('HF_TOKEN not configured — skipping NSFW check');
@@ -444,17 +459,26 @@ async function checkNSFW(imagePath) {
 
     try {
         const imageBuffer = await fs.readFile(imagePath);
-        const response = await axios.post(
+        // const response = await axios.post(
+        //     'https://api-inference.huggingface.co/models/Falconsai/nsfw_image_detection',
+        //     imageBuffer,
+        //     {
+        //         headers: {
+        //             'Authorization': `Bearer ${CONFIG.huggingFaceToken}`,
+        //             'Content-Type': 'application/octet-stream'
+        //         },
+        //         timeout: 15000
+        //     }
+        // );
+        const response = await hfRequest(
             'https://api-inference.huggingface.co/models/Falconsai/nsfw_image_detection',
             imageBuffer,
             {
-                headers: {
-                    'Authorization': `Bearer ${CONFIG.huggingFaceToken}`,
-                    'Content-Type': 'application/octet-stream'
-                },
-                timeout: 15000
+                'Authorization': `Bearer ${CONFIG.huggingFaceToken}`,
+                'Content-Type': 'application/octet-stream'
             }
         );
+
 
         const nsfwLabels = ['nsfw', 'porn', 'sexy'];
         const nsfwResult = response.data.find(r => nsfwLabels.includes(r.label.toLowerCase()));
@@ -482,7 +506,7 @@ async function matchTheme(imagePath, theme) {
         const imageBuffer = await fs.readFile(imagePath);
         const base64Image = imageBuffer.toString('base64');
 
-        const response = await axios.post(
+        const response = await hfRequest(
             'https://api-inference.huggingface.co/models/openai/clip-vit-large-patch14',
             {
                 inputs: {
@@ -491,11 +515,8 @@ async function matchTheme(imagePath, theme) {
                 }
             },
             {
-                headers: {
-                    'Authorization': `Bearer ${CONFIG.huggingFaceToken}`,
-                    'Content-Type': 'application/json'
-                },
-                timeout: 20000
+                'Authorization': `Bearer ${CONFIG.huggingFaceToken}`,
+                'Content-Type': 'application/json'
             }
         );
 
