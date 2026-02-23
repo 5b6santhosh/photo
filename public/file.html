@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>File Upload Form</title>
+</head>
+<body>
+
+<h2>Upload File</h2>
+
+<form id="uploadForm">
+    <label>Select File:</label><br>
+    <input type="file" id="fileInput" name="file"><br><br>
+
+    <label>Description:</label><br>
+    <input type="text" id="description" name="description" placeholder="Enter description"><br><br>
+
+    <button type="button" onclick="uploadFile()">Upload</button>
+</form>
+
+<p id="message"></p>
+
+<script>
+async function uploadFile() {
+    const file = document.getElementById("fileInput").files[0];
+    const description = document.getElementById("description").value;
+
+    if (!file) {
+        document.getElementById("message").innerText = "Please select a file.";
+        return;
+    }
+
+    let formData = new FormData();
+    formData.append("file", file);
+    formData.append("description", description);
+
+    try {
+        //const live_url="https://photo-production-662b.up.railway.app/api/uploads";
+        const live_url="http://localhost:10000/api/uploads";
+
+        const response = await fetch(live_url, {
+            method: "POST",
+            headers: {
+                "x-user-id": "user456", // custom header
+                "x-api-key":"5b250999-ce9e-4f48-91a1-ccbb902e129f"
+            },
+            body: formData
+        });
+
+        const result = await response.json();
+        document.getElementById("message").innerText = JSON.stringify(result, null, 2);
+
+    } catch (err) {
+        document.getElementById("message").innerText = "Error: " + err.message;
+    }
+}
+</script>
+
+</body>
+</html>
