@@ -35,10 +35,8 @@ if (missingVars.length > 0) {
 // SECURITY MIDDLEWARE
 // ============================================
 
-// Helmet for security headers
 app.use(helmet());
 
-// CORS configuration
 app.use(cors({
   origin: process.env.ALLOWED_ORIGINS?.split(',') || '*',
   credentials: true
@@ -48,7 +46,6 @@ app.use(cors({
 // RATE LIMITING
 // ============================================
 
-// Rate limiter for media evaluation
 const evaluationLimiter = rateLimit({
   windowMs: 60 * 60 * 1000, // 1 hour
   max: Number(process.env.RATE_LIMIT_EVALUATE) || 100,
@@ -58,10 +55,9 @@ const evaluationLimiter = rateLimit({
   },
   standardHeaders: true,
   legacyHeaders: false,
-  skip: (req) => process.env.NODE_ENV === 'development' // Skip in dev
+  skip: (req) => process.env.NODE_ENV === 'development'
 });
 
-// Rate limiter for appeals
 const appealsLimiter = rateLimit({
   windowMs: 60 * 60 * 1000, // 1 hour
   max: Number(process.env.RATE_LIMIT_APPEALS) || 10,
@@ -78,7 +74,6 @@ const appealsLimiter = rateLimit({
 // Special handling for Razorpay webhooks (must be BEFORE json parsing)
 app.use('/api/webhooks/razorpay', express.raw({ type: 'application/json' }));
 
-// Standard body parsing
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
@@ -86,14 +81,11 @@ app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 // ROUTES - EXISTING APPLICATION
 // ============================================
 
-// Webhook routes (must be first, before other routes)
 app.use('/api/webhooks/razorpay', require('./routes/razorpayWebhook'));
 
-// Authentication & User routes
 app.use('/api/auth', require('./routes/auth'));
 app.use('/api/profile', require('./routes/profile'));
 
-// Content routes
 app.use('/api/home', require('./routes/home'));
 app.use('/api/uploads', require('./routes/uploads'));
 app.use('/api/likes', require('./routes/likes'));
@@ -107,21 +99,17 @@ app.use('/api/shares', require('./routes/shares'));
 app.use('/api/reports', require('./routes/reports'));
 app.use('/api/contest', require('./routes/contestDetails'));
 
-// Admin routes
 app.use('/api/admin/events', require('./routes/admin/createAdminEvents'));
 
-// Payment routes
 app.use('/api/payments', require('./routes/payments'));
 
 // ============================================
 // ROUTES - MEDIA EVALUATION (NEW)
 // ============================================
 
-// Apply rate limiters to specific media evaluation routes
 app.use('/api/media/evaluate', evaluationLimiter);
 app.use('/api/media/appeals', appealsLimiter);
 
-// Media evaluation & contest ranking routes
 app.use('/api/media', require('./routes/contest.routes'));
 // app.use('/api', require('./routes/contestRanking'));
 
@@ -140,7 +128,6 @@ app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'file.html'));
 });
 
-// API info endpoint
 app.get('/api', (req, res) => {
   res.json({
     service: 'Photocuratore API',
@@ -148,15 +135,13 @@ app.get('/api', (req, res) => {
     status: 'running',
     features: {
       mediaEvaluation: true,
-      aiEnabled: !!process.env.HF_TOKEN,
+      aiEnabled: !!process.env.GEMINI_API_KEY,
       phase2: process.env.ENABLE_PHASE2 !== 'false'
     },
     endpoints: {
-      // Existing endpoints
       auth: '/api/auth',
       contests: '/api/contests',
       submissions: '/api/contest-submissions',
-      // New media evaluation endpoints
       mediaEvaluation: '/api/media/evaluate',
       contestWinners: '/api/media/contests/:contestId/winners',
       appeals: '/api/media/appeals'
@@ -168,7 +153,6 @@ app.get('/api', (req, res) => {
 // ERROR HANDLERS
 // ============================================
 
-// 404 handler
 app.use((req, res) => {
   res.status(404).json({
     success: false,
@@ -177,11 +161,9 @@ app.use((req, res) => {
   });
 });
 
-// Global error handler
 app.use((err, req, res, next) => {
   console.error(' Global error:', err);
 
-  // Mongoose validation errors
   if (err.name === 'ValidationError') {
     return res.status(400).json({
       success: false,
@@ -190,7 +172,6 @@ app.use((err, req, res, next) => {
     });
   }
 
-  // Mongoose cast errors (invalid ObjectId)
   if (err.name === 'CastError') {
     return res.status(400).json({
       success: false,
@@ -198,7 +179,6 @@ app.use((err, req, res, next) => {
     });
   }
 
-  // JWT errors
   if (err.name === 'JsonWebTokenError') {
     return res.status(401).json({
       success: false,
@@ -206,7 +186,6 @@ app.use((err, req, res, next) => {
     });
   }
 
-  // Multer errors
   if (err.name === 'MulterError') {
     return res.status(400).json({
       success: false,
@@ -214,7 +193,6 @@ app.use((err, req, res, next) => {
     });
   }
 
-  // Default error response
   res.status(err.status || 500).json({
     success: false,
     message: 'Internal server error',
@@ -229,11 +207,9 @@ app.use((err, req, res, next) => {
 // DATABASE CONNECTION
 // ============================================
 
-const MONGO_URI = process.env.MONGO_URI;
-
 console.log(' Attempting MongoDB connection...');
 mongoose
-  .connect(MONGO_URI, {
+  .connect(process.env.MONGO_URI, {
     serverSelectionTimeoutMS: 7500
   })
   .then(() => {
@@ -245,7 +221,6 @@ mongoose
     process.exit(1);
   });
 
-// Handle MongoDB connection errors after initial connection
 mongoose.connection.on('error', err => {
   console.error(' MongoDB connection error:', err);
 });
@@ -264,7 +239,6 @@ const gracefulShutdown = async (signal) => {
   if (server) {
     server.close(async () => {
       console.log(' HTTP server closed');
-
       try {
         await mongoose.connection.close();
         console.log(' MongoDB connection closed');
@@ -293,11 +267,11 @@ process.on('unhandledRejection', (err) => {
 // START SERVER
 // ============================================
 
-// Railway assigns a PORT, fallback to 5000 for local dev
-// const PORT = process.env.PORT || 5000;
 const CONFIG = require('./config');
-const PORT = CONFIG.port;
 
+// Priority: Railway PORT env var → config → fallback 5000
+// Never hardcode 3000 — let Railway assign the port dynamically
+const PORT = process.env.PORT || CONFIG.port || 5000;
 
 const server = app.listen(PORT, '0.0.0.0', () => {
   console.log('\n' + '='.repeat(60));
@@ -308,6 +282,20 @@ const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`🔗 Base URL: ${process.env.BASE_URL || `http://localhost:${PORT}`}`);
   console.log(`🤖 AI Phase-2: ${process.env.ENABLE_PHASE2 !== 'false' ? 'Enabled' : 'Disabled'}`);
   console.log('='.repeat(60) + '\n');
+});
+
+// ── Handle port-in-use error gracefully ──────────────────────────────────────
+server.on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`\n❌ Port ${PORT} is already in use.`);
+    console.error('Fix options:');
+    console.error(`  1. Kill the process using the port:  lsof -ti:${PORT} | xargs kill -9`);
+    console.error(`  2. Set a different port in your .env file: PORT=5001`);
+    process.exit(1);
+  } else {
+    console.error(' Server error:', err);
+    process.exit(1);
+  }
 });
 
 module.exports = app;
