@@ -63,60 +63,6 @@ const evaluationLimiter = rateLimit({
   skip: (req) => process.env.NODE_ENV === 'development' // Skip in dev
 });
 
-async function warmupModels() {
-  if (!process.env.HF_TOKEN) {
-    console.warn('⚠ HF_TOKEN missing — skipping model warmup');
-    return;
-  }
-
-  if (!process.env.HF_NSFW_ENDPOINT) {
-    console.log(' No HF_NSFW_ENDPOINT configured — skipping NSFW warmup');
-    console.log('Set HF_NSFW_ENDPOINT to your Inference Endpoint URL');
-    return;
-  }
-
-  const axios = require('axios');
-  const token = process.env.HF_TOKEN.trim();
-
-  console.log('🔥 Warming up HuggingFace models...');
-
-  try {
-    const dummyImage = Buffer.from(
-      '/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0a' +
-      'HBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIy' +
-      'MjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAABAAEDASIAAhEB' +
-      'AxEB/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/xAAUAQEAAAAAAAAA' +
-      'AAAAAAAAAAD/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIRAxEAPwCwABmX/9k=',
-      'base64'
-    );
-
-    await axios.post(
-      process.env.HF_NSFW_ENDPOINT,
-      dummyImage,
-      {
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/octet-stream'
-        },
-        timeout: 30000
-      }
-    );
-
-    console.log('NSFW model warmed up (Inference Endpoint)');
-  } catch (err) {
-    console.warn('⚠ NSFW warmup failed:', err.response?.status || err.message);
-  }
-}
-// Rate limiter for appeals
-const appealsLimiter = rateLimit({
-  windowMs: 60 * 60 * 1000, // 1 hour
-  max: Number(process.env.RATE_LIMIT_APPEALS) || 10,
-  message: {
-    success: false,
-    error: 'Too many appeal requests. Please try again later.'
-  }
-});
-
 // ============================================
 // BODY PARSING MIDDLEWARE
 // ============================================
@@ -165,7 +111,6 @@ app.use('/api/payments', require('./routes/payments'));
 
 // Apply rate limiters to specific media evaluation routes
 app.use('/api/media/evaluate', evaluationLimiter);
-app.use('/api/media/appeals', appealsLimiter);
 
 // Media evaluation & contest ranking routes
 app.use('/api/media', require('./routes/contest.routes'));
@@ -285,10 +230,6 @@ mongoose
   .then(() => {
     console.log(' MongoDB connected successfully');
     console.log(` Database: ${mongoose.connection.name}`);
-    if (process.env.HF_TOKEN && process.env.ENABLE_PHASE2 !== 'false') {
-      warmupModels();
-    }
-
   })
   .catch((err) => {
     console.error(' MongoDB connection FAILED:', err.message);

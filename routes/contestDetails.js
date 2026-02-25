@@ -10,6 +10,9 @@ const FileMeta = require('../models/FileMeta');
 const { authMiddleware: authMiddleware } = require('../middleware/auth');
 const Submission = require('../models/Submission');
 const JudgeDecision = require('../models/JudgeDecision');
+const multer = require('multer');
+const path = require('path');
+const { v4: uuidv4 } = require('uuid');
 
 function formatHighlightPhoto(photo, contestEndDate) {
     if (!photo) return null;
