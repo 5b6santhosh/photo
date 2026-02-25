@@ -301,6 +301,8 @@ router.post('/verify', authMiddleware, async (req, res) => {
                 $set: {
                     paymentId: razorpay_payment_id,
                     // Status remains 'pending' until webhook confirms
+                    status: 'verified',   //--> work for now
+                    verifiedAt: new Date(),   //--> work for now
                     updatedAt: new Date()
                 }
             },
@@ -325,8 +327,10 @@ router.post('/verify', authMiddleware, async (req, res) => {
             verified: true,
             paymentId: razorpay_payment_id,
             orderId: razorpay_order_id,
-            message: 'Payment received. Verification in progress...',
-            status: 'processing'
+            // message: 'Payment received. Verification in progress...',
+            // status: 'processing'
+            message: 'Payment verified successfully',
+            status: 'verified'  
         });
 
     } catch (err) {

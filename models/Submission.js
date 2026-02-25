@@ -42,10 +42,17 @@ const submissionSchema = new mongoose.Schema({
   // Submission status
   status: {
     type: String,
-    enum: ['pending', 'approved', 'rejected', 'shortlisted', 'winner', 'disqualified'],
+    enum: ['pending', 'approved', 'rejected', 'shortlisted', 'winner', 'disqualified', 'review'],
     default: 'pending',
     index: true
   },
+
+  verdict: {
+    type: String,
+    enum: ['approved', 'rejected', 'review', 'error', 'pending'],
+    default: 'pending'
+  },
+
 
   // Caption/description
   caption: {
@@ -104,6 +111,16 @@ const submissionSchema = new mongoose.Schema({
     default: null,
     min: 0
   },
+  mediaUrl: { type: String, default: null },
+  thumbnailUrl: { type: String, default: null },
+  cloudinaryPublicId: { type: String, default: null },
+  caption: { type: String, default: '' },
+  mediaType: { type: String, enum: ['image', 'video'], default: 'image' },
+  aiScore: { type: Number, min: 0, max: 100 },
+  submittedAt: { type: Date, default: Date.now },
+  evaluatedAt: { type: Date },
+
+
 
   // Metadata
   metadata: {

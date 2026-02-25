@@ -3,11 +3,11 @@
 // ============================================
 
 const sharp = require('sharp');
-const axios = require('axios');
 const fs = require('fs').promises;
 const path = require('path');
 const ffmpeg = require('fluent-ffmpeg');
 const ffprobeStatic = require('ffprobe-static');
+const { GoogleGenerativeAI } = require('@google/generative-ai');
 const CONFIG = require('../config');
 const { saveMLFeatures } = require('./mlFeatureLogger');
 const { detectDuplicate } = require('./antiCheat.service');
@@ -16,6 +16,111 @@ try {
     ffmpeg.setFfprobePath(ffprobeStatic.path);
 } catch (err) {
     console.error('ffprobe not found — video evaluation disabled');
+}
+
+// ============================================
+// GEMINI AI SETUP
+// ============================================
+
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+// gemini-1.5-flash: free tier = 15 RPM, 1 million TPM
+const geminiModel = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+
+/**
+ * Robust JSON parser for Gemini responses.
+ * Handles markdown code fences and extracts the outermost { } block.
+ */
+function parseGeminiJSON(text) {
+    // Strip markdown fences if present
+    const stripped = text.replace(/```json\s*/gi, '').replace(/```\s*/gi, '').trim();
+    // Find outermost braces
+    const start = stripped.indexOf('{');
+    const end = stripped.lastIndexOf('}');
+    if (start === -1 || end === -1) {
+        throw new Error('No JSON object found in Gemini response');
+    }
+    return JSON.parse(stripped.slice(start, end + 1));
+}
+
+/**
+ * Single Gemini multimodal call that evaluates NSFW, theme match, and quality
+ * all at once — uses only 1 of the 15 free RPM quota per submission.
+ *
+ * @param {string} filePath   - Path to image or video thumbnail
+ * @param {string} mimetype   - MIME type of the file (e.g. 'image/jpeg')
+ * @param {string|null} theme - Contest theme string, or null
+ * @returns {object} Structured AI insights
+ */
+async function performGeminiEvaluation(filePath, mimetype, theme) {
+    if (!process.env.GEMINI_API_KEY) {
+        console.warn('GEMINI_API_KEY not configured — skipping AI evaluation');
+        return { skipped: true, error: false };
+    }
+
+    try {
+        const fileBuffer = await fs.readFile(filePath);
+
+        const imagePart = {
+            inlineData: {
+                data: fileBuffer.toString('base64'),
+                mimeType: mimetype
+            }
+        };
+
+        const prompt = `Analyze this media for a contest entry. Contest Theme: "${theme || 'General'}".
+
+Respond ONLY with a valid JSON object — no markdown, no explanation, no code fences.
+Use exactly these keys:
+{
+  "nsfw_score": <number 0.0–1.0, where 1.0 = explicit/inappropriate>,
+  "theme_similarity": <number 0.0–1.0, where 1.0 = perfect theme match>,
+  "perceptual_quality": <number 0–100, based on lighting, focus, and composition>,
+  "is_ai_generated": <boolean, true if image/video looks synthetically generated>,
+  "brief_reasoning": "<one sentence explaining the scores>"
+}`;
+
+        const result = await geminiModel.generateContent([prompt, imagePart]);
+        const text = result.response.text();
+        const data = parseGeminiJSON(text);
+
+        // Validate expected keys exist
+        if (
+            typeof data.nsfw_score !== 'number' ||
+            typeof data.theme_similarity !== 'number' ||
+            typeof data.perceptual_quality !== 'number'
+        ) {
+            throw new Error('Gemini response missing required numeric fields');
+        }
+
+        const nsfwThreshold = CONFIG.nsfwThreshold ?? 0.7;
+        const themeThreshold = CONFIG.themeThreshold ?? 0.6;
+
+        return {
+            isNSFW: data.nsfw_score > nsfwThreshold,
+            nsfwProbability: data.nsfw_score,
+            themeSimilarity: data.theme_similarity,
+            themeMatched: data.theme_similarity > themeThreshold,
+            perceptualQuality: data.perceptual_quality,
+            isAIGenerated: data.is_ai_generated ?? false,
+            explanation: data.brief_reasoning ?? '',
+            error: false,
+            skipped: false
+        };
+
+    } catch (error) {
+        console.error('Gemini evaluation error:', error.message);
+        return {
+            isNSFW: false,
+            nsfwProbability: 0,
+            themeSimilarity: 0.5,
+            themeMatched: false,
+            perceptualQuality: 50,
+            isAIGenerated: false,
+            explanation: '',
+            error: true,
+            skipped: false
+        };
+    }
 }
 
 // ============================================
@@ -52,7 +157,7 @@ async function analyzeMediaPhase1(filePath, mimetype, contestRules = null) {
         const qualityScore = qualityResult.score;
         feedback.push(...qualityResult.feedback);
 
-        // Safety (0–30 pts)  ← scoreSafety now returns values in [0, 30]
+        // Safety (0–30 pts)
         const skinRatio = await detectSkinTones(thumbnailPath);
         const safetyResult = scoreSafety(metadata, skinRatio, isVideo);
         const safetyScore = safetyResult.score;
@@ -101,13 +206,6 @@ async function analyzeMediaPhase1(filePath, mimetype, contestRules = null) {
 // VIDEO METADATA + THUMBNAIL EXTRACTION
 // ============================================
 
-/**
- *  FIX #3: thumbnailStats were previously calculated BEFORE ffmpeg created
- * the thumbnail file — sharp would throw "Input file is missing".
- *
- * Fix: move all sharp calls INSIDE the ffmpeg 'end' callback, after the file
- * is guaranteed to exist on disk.
- */
 async function extractVideoMetadata(filePath) {
     return new Promise((resolve, reject) => {
         ffmpeg.ffprobe(filePath, (err, probeData) => {
@@ -134,7 +232,6 @@ async function extractVideoMetadata(filePath) {
                 fps,
                 hasAudio: !!audioStream,
                 fileSize: parseInt(format.size) || 0,
-                // brightness & entropy filled in after thumbnail is ready
                 brightness: null,
                 entropy: null
             };
@@ -150,11 +247,10 @@ async function extractVideoMetadata(filePath) {
                     reject(new Error(`Thumbnail extraction failed: ${thumbErr.message}`))
                 )
                 .on('end', async () => {
-                    // Small delay to ensure the file is fully flushed to disk
+                    // Small delay to ensure ffmpeg has fully flushed the file to disk
                     await new Promise(r => setTimeout(r, 150));
 
                     try {
-                        // ✅ NOW safe to read the thumbnail — ffmpeg has finished writing it
                         const thumbnailStats = await sharp(thumbnailPath).stats();
 
                         metadata.brightness =
@@ -215,7 +311,7 @@ function scoreQuality(metadata, stats, isVideo) {
     const { width, height } = metadata;
     const pixels = width * height;
 
-    // Resolution (0-15)
+    // Resolution (0–15 pts)
     if (pixels >= CONFIG.scoring.resolution.excellent) {
         score += 15;
         feedback.push('✓ Excellent resolution');
@@ -228,7 +324,7 @@ function scoreQuality(metadata, stats, isVideo) {
     }
 
     if (isVideo) {
-        // Orientation (0-10)
+        // Orientation (0–10 pts)
         const aspectRatio = width / height;
         if (aspectRatio < 0.7) {
             score += 10;
@@ -238,7 +334,7 @@ function scoreQuality(metadata, stats, isVideo) {
             feedback.push('⚠ Horizontal format — vertical is preferred');
         }
 
-        // Duration (0-10)
+        // Duration (0–10 pts)
         if (metadata.duration > 0 && metadata.duration <= CONFIG.maxDuration) {
             score += 10;
             feedback.push(`✓ Duration (${metadata.duration.toFixed(1)}s) within limit`);
@@ -247,7 +343,7 @@ function scoreQuality(metadata, stats, isVideo) {
             feedback.push(`✗ Exceeds ${CONFIG.maxDuration}s duration limit`);
         }
 
-        // FPS & Bitrate (0-10)
+        // FPS & Bitrate (0–10 pts)
         if (metadata.fps >= CONFIG.scoring.fps.good) {
             score += 5;
             feedback.push('✓ Good frame rate');
@@ -257,7 +353,7 @@ function scoreQuality(metadata, stats, isVideo) {
             feedback.push('✓ Good bitrate quality');
         }
     } else {
-        // Aspect ratio for images (0-10)
+        // Aspect ratio for images (0–10 pts)
         const ratio = width / height;
         if (ratio >= 0.8 && ratio <= 1.8) {
             score += 10;
@@ -268,7 +364,7 @@ function scoreQuality(metadata, stats, isVideo) {
         }
     }
 
-    // Sharpness (0-10)
+    // Sharpness via standard deviation (0–10 pts)
     const avgStd = stats.channels.reduce((sum, ch) => sum + ch.stdev, 0) / stats.channels.length;
     if (avgStd > CONFIG.scoring.sharpness.good) {
         score += 10;
@@ -278,7 +374,7 @@ function scoreQuality(metadata, stats, isVideo) {
         feedback.push('⚠ Image appears blurry — improve focus');
     }
 
-    // Brightness (0-5)
+    // Brightness (0–5 pts)
     const avgBrightness = stats.channels.reduce((sum, ch) => sum + ch.mean, 0) / stats.channels.length;
     if (avgBrightness > CONFIG.scoring.brightness.min && avgBrightness < CONFIG.scoring.brightness.max) {
         score += 5;
@@ -293,27 +389,25 @@ function scoreQuality(metadata, stats, isVideo) {
 
 // ============================================
 // SAFETY SCORER  (0–30 pts)
-//  FIX #2 & #7: Rewritten so score starts at 0 and only accumulates up to 30.
-//    Previously started at 30 AND added bonuses, allowing totals of 55+.
+// Score starts at 0 and builds up — never exceeds 30.
 // ============================================
 
 function scoreSafety(metadata, skinRatio, isVideo) {
-    let score = 0;        // Start at 0, build up — max possible is 30
+    let score = 0;
     const feedback = [];
     const fileSizeMB = metadata.fileSize / (1024 * 1024);
 
-    // File size (0-15 pts)
+    // File size (0–15 pts)
     if (fileSizeMB <= CONFIG.maxSizeMB) {
         score += 15;
         feedback.push('✓ File size within limits');
     } else {
-        // Oversized: zero points for this component (already implicitly 0)
         feedback.push(`✗ File too large (${fileSizeMB.toFixed(1)}MB > ${CONFIG.maxSizeMB}MB)`);
     }
 
-    // Skin tone (0-10 pts)
+    // Skin tone ratio (0–10 pts)
     if (skinRatio > 60) {
-        // No points — flagged for AI review
+        // Zero points — flagged for AI review
         feedback.push('⚠ High skin exposure — flagged for AI review');
     } else if (skinRatio > 40) {
         score += 5;
@@ -323,13 +417,12 @@ function scoreSafety(metadata, skinRatio, isVideo) {
         feedback.push('✓ Appropriate content exposure');
     }
 
-    // Audio safety bonus for videos (0-5 pts)
+    // Audio safety bonus for silent videos (0–5 pts)
     if (isVideo && !metadata.hasAudio) {
         score += 5;
         feedback.push('✓ Silent video (no audio concerns)');
     }
 
-    // Hard cap — should already be ≤ 30 by construction, but kept for safety
     return { score: Math.min(30, score), feedback };
 }
 
@@ -349,7 +442,7 @@ function evaluateThemeWithRules({ stats, skinRatio, metadata, isVideo }, contest
         .map(ch => ch.entropy || 0)
         .reduce((a, b) => a + b, 0) / stats.channels.length;
 
-    // Entropy check (0-10)
+    // Entropy / visual complexity check (0–10 pts)
     if (contestRules.minEntropy && entropy < contestRules.minEntropy) {
         feedback.push('⚠ Low visual complexity for contest theme');
     } else if (contestRules.maxEntropy && entropy > contestRules.maxEntropy) {
@@ -359,7 +452,7 @@ function evaluateThemeWithRules({ stats, skinRatio, metadata, isVideo }, contest
         feedback.push('✓ Visual complexity matches theme');
     }
 
-    // Skin exposure rules (0-10)
+    // Skin exposure range check (0–10 pts)
     if (contestRules.skinRange && Array.isArray(contestRules.skinRange)) {
         const [minSkin, maxSkin] = contestRules.skinRange;
         if (skinRatio >= minSkin && skinRatio <= maxSkin) {
@@ -370,7 +463,7 @@ function evaluateThemeWithRules({ stats, skinRatio, metadata, isVideo }, contest
         }
     }
 
-    // Orientation requirement (0-5)
+    // Orientation requirement (0–5 pts)
     if (contestRules.requireVertical && isVideo) {
         const ratio = metadata.width / metadata.height;
         if (ratio < 0.7) {
@@ -381,7 +474,7 @@ function evaluateThemeWithRules({ stats, skinRatio, metadata, isVideo }, contest
         }
     }
 
-    // Color preference (0-5, basic heuristic)
+    // Color preference heuristic (0–5 pts)
     if (contestRules.preferredColor === 'green') {
         if (stats.channels.length >= 3 && stats.channels[1]?.mean > stats.channels[0]?.mean) {
             score += 5;
@@ -433,118 +526,6 @@ async function detectSkinTones(imagePath) {
 }
 
 // ============================================
-// AI CHECKS  (Phase 2)
-// ============================================
-
-async function checkNSFW(imagePath) {
-    if (!CONFIG.huggingFaceToken) {
-        console.warn('HF_TOKEN not configured — skipping NSFW check');
-        return { isNSFW: false, score: 0, confidence: 0, skipped: true };
-    }
-
-    try {
-        const imageBuffer = await fs.readFile(imagePath);
-        const response = await axios.post(
-            'https://api-inference.huggingface.co/models/Falconsai/nsfw_image_detection',
-            imageBuffer,
-            {
-                headers: {
-                    'Authorization': `Bearer ${CONFIG.huggingFaceToken}`,
-                    'Content-Type': 'application/octet-stream'
-                },
-                timeout: 15000
-            }
-        );
-
-        const nsfwLabels = ['nsfw', 'porn', 'sexy'];
-        const nsfwResult = response.data.find(r => nsfwLabels.includes(r.label.toLowerCase()));
-
-        return {
-            isNSFW: nsfwResult && nsfwResult.score > CONFIG.nsfwThreshold,
-            score: nsfwResult?.score || 0,
-            confidence: nsfwResult?.score || 0
-        };
-    } catch (error) {
-        console.error('NSFW check failed:', error.message);
-        return { isNSFW: false, score: 0, confidence: 0, error: true };
-    }
-}
-
-async function matchTheme(imagePath, theme) {
-    if (!theme) return { similarity: 0.5, matched: true, skipped: true };
-
-    if (!CONFIG.huggingFaceToken) {
-        console.warn('HF_TOKEN not configured — skipping theme match');
-        return { similarity: 0.5, matched: false, skipped: true };
-    }
-
-    try {
-        const imageBuffer = await fs.readFile(imagePath);
-        const base64Image = imageBuffer.toString('base64');
-
-        const response = await axios.post(
-            'https://api-inference.huggingface.co/models/openai/clip-vit-large-patch14',
-            {
-                inputs: {
-                    image: base64Image,
-                    candidate_labels: [theme, 'unrelated content', 'random image']
-                }
-            },
-            {
-                headers: {
-                    'Authorization': `Bearer ${CONFIG.huggingFaceToken}`,
-                    'Content-Type': 'application/json'
-                },
-                timeout: 20000
-            }
-        );
-
-        const themeSimilarity = response.data[0]?.score || 0.3;
-        return {
-            similarity: themeSimilarity,
-            matched: themeSimilarity > CONFIG.themeThreshold,
-            confidence: themeSimilarity
-        };
-    } catch (error) {
-        console.error('Theme matching failed:', error.message);
-        return { similarity: 0.3, matched: false, error: true };
-    }
-}
-
-async function assessImageQuality(imagePath, cachedStats = null) {
-    try {
-        const image = sharp(imagePath);
-        const stats = cachedStats || await image.stats();
-
-        const { data } = await image
-            .greyscale()
-            .resize(512, 512, { fit: 'inside' })
-            .raw()
-            .toBuffer({ resolveWithObject: true });
-
-        let edgeStrength = 0;
-        for (let i = 1; i < data.length - 1; i++) {
-            edgeStrength += Math.abs(data[i] - data[i - 1]);
-        }
-        const sharpness = Math.min(100, (edgeStrength / data.length) * 2);
-
-        const contrast = stats.channels.reduce((sum, ch) => sum + ch.stdev, 0) / stats.channels.length;
-        const normalizedContrast = Math.min(100, (contrast / 50) * 100);
-        const qualityScore = sharpness * 0.6 + normalizedContrast * 0.4;
-
-        return {
-            score: Math.round(qualityScore),
-            sharpness: Math.round(sharpness),
-            contrast: Math.round(normalizedContrast),
-            isGood: qualityScore > 60
-        };
-    } catch (error) {
-        console.error('Quality assessment failed:', error.message);
-        return { score: 50, sharpness: 50, contrast: 50, isGood: true, error: true };
-    }
-}
-
-// ============================================
 // MAIN EVALUATION FUNCTION
 // ============================================
 
@@ -581,65 +562,84 @@ async function evaluateMedia(filePath, mimetype, contestRules) {
         if (!phase1.features) phase1.features = {};
         phase1.features.perceptualHash = duplicateCheck.hash;
 
-        // AI checks (Phase 2 layer)
+        // ─── Phase 2: Single Gemini call (1 RPM used) ───────────────────────
         if (CONFIG.enablePhase2 && phase1.needsPhase2 && !duplicateCheck.isDuplicate) {
-            console.log('🤖 Phase-2 triggered — running AI checks...');
+            console.log('🤖 Phase-2 triggered — running Gemini AI evaluation...');
 
-            try {
-                const [nsfwCheck, themeMatch, qualityCheck] = await Promise.allSettled([
-                    checkNSFW(phase1.thumbnailPath),
-                    matchTheme(phase1.thumbnailPath, contestRules?.theme),
-                    assessImageQuality(phase1.thumbnailPath, phase1.thumbnailStats)
-                ]);
+            // For video, evaluate the extracted thumbnail (JPEG).
+            // For images, evaluate the original file directly.
+            const mediaToAnalyze = phase1.isVideo ? phase1.thumbnailPath : filePath;
+            const mediaMime = phase1.isVideo ? 'image/jpeg' : mimetype;
 
-                const nsfw = nsfwCheck.status === 'fulfilled' ? nsfwCheck.value : { isNSFW: false, error: true };
-                const themeResult = themeMatch.status === 'fulfilled' ? themeMatch.value : { matched: false, error: true };
-                const quality = qualityCheck.status === 'fulfilled' ? qualityCheck.value : { score: 50, error: true };
+            const geminiResult = await performGeminiEvaluation(
+                mediaToAnalyze,
+                mediaMime,
+                contestRules?.theme
+            );
 
+            if (!geminiResult.skipped) {
+                // Build aiInsights in the same shape the rest of the code expects
                 aiInsights = {
-                    nsfwProbability: nsfw.score,
-                    isNSFW: nsfw.isNSFW,
-                    themeSimilarity: themeResult.similarity,
-                    themeMatched: themeResult.matched,
-                    perceptualQuality: quality.score,
-                    sharpness: quality.sharpness,
-                    contrast: quality.contrast
+                    isNSFW: geminiResult.isNSFW,
+                    nsfwProbability: geminiResult.nsfwProbability,
+                    themeSimilarity: geminiResult.themeSimilarity,
+                    themeMatched: geminiResult.themeMatched,
+                    perceptualQuality: geminiResult.perceptualQuality,
+                    isAIGenerated: geminiResult.isAIGenerated,
+                    explanation: geminiResult.explanation,
+                    // Sharpness derived from Phase-1 stats (no extra API call needed)
+                    sharpness: Math.round(
+                        Math.min(
+                            100,
+                            (phase1.thumbnailStats.channels.reduce((s, ch) => s + ch.stdev, 0) /
+                                phase1.thumbnailStats.channels.length / 50) * 100
+                        )
+                    )
                 };
 
-                if (nsfw.isNSFW) {
+                // ── NSFW verdict ─────────────────────────────────────────────
+                if (geminiResult.isNSFW) {
                     phase1.breakdown.safety = -50;
                     finalScore = -50;
                     verdict = 'rejected';
-                    allFeedback.push('✗ AI detected inappropriate content');
-                } else if (!nsfw.error) {
-                    allFeedback.push('✓ AI safety check passed');
+                    allFeedback.push('✗ Gemini detected inappropriate content');
+                } else if (!geminiResult.error) {
+                    allFeedback.push('✓ Gemini safety check passed');
                 }
 
-                if (contestRules?.theme) {
-                    if (themeResult.matched && !themeResult.error) {
+                // ── Theme adjustment ─────────────────────────────────────────
+                if (contestRules?.theme && !geminiResult.error) {
+                    if (geminiResult.themeMatched) {
                         phase1.breakdown.theme = Math.max(phase1.breakdown.theme, 25);
                         allFeedback.push(
-                            `✓ AI confirmed theme match (${Math.round(themeResult.similarity * 100)}% confidence)`
+                            `✓ AI Theme Match: ${Math.round(geminiResult.themeSimilarity * 100)}%`
                         );
-                    } else if (!themeResult.matched && !themeResult.error) {
+                    } else {
                         phase1.breakdown.theme = Math.min(phase1.breakdown.theme, 10);
                         allFeedback.push(
-                            `⚠ AI: Low theme relevance (${Math.round(themeResult.similarity * 100)}% confidence)`
+                            `⚠ AI: Low theme relevance (${Math.round(geminiResult.themeSimilarity * 100)}%)`
                         );
                     }
                 }
 
-                if (quality.score > 70 && !quality.error) {
+                // ── Quality boost ────────────────────────────────────────────
+                if (!geminiResult.error && geminiResult.perceptualQuality > 75) {
                     phase1.breakdown.quality = Math.min(40, phase1.breakdown.quality + 10);
                     allFeedback.push('✓ AI: High perceptual quality detected');
                 }
 
-                finalScore = Object.values(phase1.breakdown).reduce((a, b) => a + b, 0);
-                finalScore = Math.max(0, Math.min(100, finalScore));
+                // ── AI-generated content flag ────────────────────────────────
+                if (geminiResult.isAIGenerated) {
+                    allFeedback.push('⚠ AI: Submission may be synthetically generated');
+                }
 
-            } catch (aiError) {
-                console.warn('⚠ Phase-2 partial failure:', aiError.message);
-                allFeedback.push('⚠ Some AI checks failed — relying on rule-based analysis');
+                // Recalculate total only if not already hard-rejected
+                if (verdict !== 'rejected') {
+                    finalScore = Object.values(phase1.breakdown).reduce((a, b) => a + b, 0);
+                    finalScore = Math.max(0, Math.min(100, finalScore));
+                }
+            } else {
+                allFeedback.push('⚠ AI evaluation skipped — relying on rule-based analysis');
             }
         }
 
@@ -651,7 +651,6 @@ async function evaluateMedia(filePath, mimetype, contestRules) {
         }
 
         const explanation = buildExplanation({ phase1, aiInsights, verdict, finalScore });
-
 
         await saveMLFeatures({
             contestId: contestRules.contestId,
@@ -731,20 +730,32 @@ function buildExplanation({ phase1, aiInsights, verdict, finalScore }) {
         if (aiInsights.themeMatched === false && aiInsights.themeSimilarity < 0.3) {
             reasons.push('✗ AI found low semantic similarity to theme');
         }
+        if (aiInsights.isAIGenerated) {
+            reasons.push('⚠ Submission may be AI-generated synthetic media');
+        }
+        if (aiInsights.explanation) {
+            reasons.push(`ℹ AI reasoning: ${aiInsights.explanation}`);
+        }
     }
 
     let summary;
-    if (verdict === 'approved') summary = `✓ Your submission meets the contest requirements (Score: ${finalScore}/100)`;
-    else if (verdict === 'review') summary = `⚠ Your submission needs human review (Score: ${finalScore}/100)`;
-    else summary = `✗ Your submission did not meet contest requirements (Score: ${finalScore}/100)`;
+    if (verdict === 'approved') {
+        summary = `✓ Your submission meets the contest requirements (Score: ${finalScore}/100)`;
+    } else if (verdict === 'review') {
+        summary = `⚠ Your submission needs human review (Score: ${finalScore}/100)`;
+    } else {
+        summary = `✗ Your submission did not meet contest requirements (Score: ${finalScore}/100)`;
+    }
 
     return { verdict, summary, reasons, score: finalScore };
 }
 
+// ============================================
+// EXPORTS
+// ============================================
+
 module.exports = {
     evaluateMedia,
     analyzeMediaPhase1,
-    checkNSFW,
-    matchTheme,
-    assessImageQuality
+    performGeminiEvaluation
 };

@@ -22,6 +22,8 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@google/generative-ai": "^0.24.1",
+    "@huggingface/inference": "^4.13.12",
     "@upstash/redis": "^1.36.1",
     "axios": "^1.6.0",
     "bcryptjs": "^3.0.3",

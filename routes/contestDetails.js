@@ -10,6 +10,9 @@ const FileMeta = require('../models/FileMeta');
 const { authMiddleware: authMiddleware } = require('../middleware/auth');
 const Submission = require('../models/Submission');
 const JudgeDecision = require('../models/JudgeDecision');
+const multer = require('multer');
+const path = require('path');
+const { v4: uuidv4 } = require('uuid');
 
 function formatHighlightPhoto(photo, contestEndDate) {
     if (!photo) return null;
@@ -30,6 +33,26 @@ function formatHighlightPhoto(photo, contestEndDate) {
         blurHash: photo.blurHash || null,
     };
 }
+
+const storage = multer.diskStorage({
+    destination: (req, file, cb) => cb(null, 'uploads/temp/'),
+    filename: (req, file, cb) => {
+        const unique = `${uuidv4()}${path.extname(file.originalname)}`;
+        cb(null, unique);
+    }
+});
+
+const upload = multer({
+    storage,
+    limits: { fileSize: 500 * 1024 * 1024 }, // 500MB max
+    fileFilter: (req, file, cb) => {
+        const allowed = ['image/jpeg', 'image/png', 'image/webp', 'video/mp4', 'video/quicktime'];
+        allowed.includes(file.mimetype)
+            ? cb(null, true)
+            : cb(new Error('Invalid file type'));
+    }
+});
+
 
 router.get('/:contestId/details', authMiddleware, async (req, res) => {
     try {
@@ -355,110 +378,200 @@ router.get('/:contestId/entry-status', authMiddleware, async (req, res) => {
     }
 });
 
-// POST endpoint to submit photos/videos to contest
-router.post('/:contestId/submit', authMiddleware, async (req, res) => {
-    try {
-        const { contestId } = req.params;
-        const userId = req.user.id;
-        const { photos, videos, metadata } = req.body;
+router.post(
+    '/:contestId/submit',
+    authMiddleware,
+    upload.single('media'), 
+    async (req, res) => {
+        const session = await mongoose.startSession();
+        session.startTransaction();
 
-        if (!contestId || !mongoose.Types.ObjectId.isValid(contestId)) {
-            return res.status(400).json({ message: 'Invalid contest ID' });
-        }
+        try {
+            const { contestId } = req.params;
+            const userId = req.user.id;
+            const { caption } = req.body;
+            const file = req.file;
 
-        // Validate that at least one photo or video is provided
-        if ((!photos || photos.length === 0) && (!videos || videos.length === 0)) {
-            return res.status(400).json({
-                message: 'At least one photo or video is required'
-            });
-        }
+            // ── 1. Basic validation ──────────────────────────────────────────
+            if (!mongoose.Types.ObjectId.isValid(contestId)) {
+                return res.status(400).json({ success: false, message: 'Invalid contest ID' });
+            }
 
-        // Check if contest exists and is open
-        const contest = await Contest.findById(contestId);
-        if (!contest) {
-            return res.status(404).json({ message: 'Contest not found' });
-        }
+            if (!file) {
+                return res.status(400).json({ success: false, message: 'Media file is required' });
+            }
 
-        if (!contest.isOpenForSubmissions) {
-            return res.status(400).json({
-                message: 'Contest is not open for submissions'
-            });
-        }
+            // ── 2. Load contest ──────────────────────────────────────────────
+            const contest = await Contest.findById(contestId).session(session);
+            if (!contest) {
+                return res.status(404).json({ success: false, message: 'Contest not found' });
+            }
 
-        // Check if already submitted
-        const existingEntry = await ContestEntry.findOne({
-            userId,
-            contestId,
-            status: { $in: ['submitted', 'approved'] }
-        });
+            if (!contest.isOpenForSubmissions) {
+                return res.status(400).json({ success: false, message: 'Contest is not open for submissions' });
+            }
 
-        if (existingEntry) {
-            return res.status(400).json({
-                message: 'You have already submitted to this contest',
-                existingEntry: {
-                    id: existingEntry._id,
-                    status: existingEntry.status,
-                    submittedAt: existingEntry.submittedAt
-                }
-            });
-        }
-
-        // If contest has entry fee, verify payment
-        if (contest.entryFee && contest.entryFee > 0) {
-            const payment = await Payment.findOne({
-                userId,
-                contestId,
-                status: 'verified',
-                used: false
-            });
-
-            if (!payment) {
-                return res.status(402).json({
-                    message: 'Payment required. Please complete payment first.',
-                    entryFee: contest.entryFee
+            // Check allowed media types
+            const isVideo = file.mimetype.startsWith('video/');
+            const mediaType = isVideo ? 'video' : 'image';
+            if (!contest.allowedMediaTypes.includes(mediaType)) {
+                return res.status(400).json({
+                    success: false,
+                    message: `This contest only allows: ${contest.allowedMediaTypes.join(', ')}`
                 });
             }
 
-            // Mark payment as used
-            payment.used = true;
-            await payment.save();
-        }
-
-        // Create contest entry
-        const contestEntry = await ContestEntry.create({
-            userId,
-            contestId,
-            photos: photos || [],
-            videos: videos || [],
-            status: 'submitted',
-            submittedAt: new Date(),
-            metadata: metadata || {}
-        });
-
-        // Update contest submission count
-        await Contest.findByIdAndUpdate(contestId, {
-            $inc: { totalSubmissions: 1 }
-        });
-
-        res.status(201).json({
-            message: 'Submission successful',
-            entry: {
-                id: contestEntry._id,
-                status: contestEntry.status,
-                submittedAt: contestEntry.submittedAt,
-                photos: contestEntry.photos,
-                videos: contestEntry.videos
+            // ── 3. Check duplicate submission ────────────────────────────────
+            const existingEntry = await ContestEntry.findOne({ userId, contestId }).session(session);
+            if (existingEntry && ['submitted', 'paid'].includes(existingEntry.status)) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'You have already submitted to this contest'
+                });
             }
-        });
 
-    } catch (err) {
-        console.error('SUBMIT CONTEST ENTRY ERROR:', err);
-        res.status(500).json({
-            message: 'Failed to submit entry',
-            error: process.env.NODE_ENV === 'development' ? err.message : 'Internal server error'
-        });
+            // ── 4. Payment check ─────────────────────────────────────────────
+            let paymentId = null;
+
+            if (contest.entryFee && contest.entryFee > 0) {
+                const payment = await Payment.findOne({
+                    userId,
+                    contestId,
+                    status: 'verified',
+                    used: false
+                }).session(session);
+
+                if (!payment) {
+                    return res.status(402).json({
+                        success: false,
+                        message: 'Payment required. Please complete payment first.',
+                        entryFee: contest.entryFee
+                    });
+                }
+
+                payment.used = true;
+                await payment.save({ session });
+                paymentId = payment._id;
+            } else {
+                // Free contest — create a dummy/free payment record or use a sentinel
+                // If paymentId is truly required in your schema, create a free Payment record:
+                const freePayment = await Payment.create([{
+                    userId,
+                    contestId,
+                    status: 'verified',
+                    amount: 0,
+                    used: true,
+                    type: 'free'
+                }], { session });
+                paymentId = freePayment[0]._id;
+            }
+
+            // ── 5. Upload file to your storage (Cloudinary / S3 / local) ─────
+            // Replace this block with your actual upload logic:
+            let mediaUrl, thumbnailUrl, cloudId;
+
+            if (isVideo) {
+                // Example: Cloudinary video upload
+                // const result = await cloudinary.uploader.upload(file.path, { resource_type: 'video', ... });
+                // mediaUrl = result.secure_url;
+                // thumbnailUrl = result.secure_url.replace('/upload/', '/upload/so_0/').replace(/\.\w+$/, '.jpg');
+                // cloudId = result.public_id;
+
+                mediaUrl = `/uploads/${file.filename}`;       // ← replace with real URL
+                thumbnailUrl = `/uploads/${file.filename}`;   // ← replace with thumbnail
+                cloudId = file.filename;
+            } else {
+                // Example: Cloudinary image upload
+                // const result = await cloudinary.uploader.upload(file.path, { folder: 'contests' });
+                // mediaUrl = result.secure_url;
+                // thumbnailUrl = result.secure_url;
+                // cloudId = result.public_id;
+
+                mediaUrl = `/uploads/${file.filename}`;       // ← replace with real URL
+                thumbnailUrl = `/uploads/${file.filename}`;
+                cloudId = file.filename;
+            }
+
+            // ── 6. Create FileMeta ← THIS IS THE MISSING PIECE ──────────────
+            // Without this, the feed query (FileMeta.find) will never see the submission
+            const [fileMeta] = await FileMeta.create([{
+                fileName: file.filename,
+                originalName: file.originalname,
+                mimeType: file.mimetype,
+                size: file.size,
+                path: mediaUrl,              // public URL for feed
+                thumbnailUrl: thumbnailUrl,
+                createdBy: userId,
+                event: contestId,            // ← links to contest, feeds eventTitle in feed
+                isSubmission: true,          // ← marks it as a contest submission
+                isVideo: isVideo,
+                visibility: 'public',        // ← required for feed query
+                archived: false,             // ← required for feed query
+                title: caption || '',
+                cloudId: cloudId,
+            }], { session });
+
+            // ── 7. Create or update ContestEntry ────────────────────────────
+            await ContestEntry.findOneAndUpdate(
+                { contestId, userId },
+                {
+                    $set: {
+                        paymentId,
+                        status: 'submitted',
+                        submittedAt: new Date(),
+                    }
+                },
+                { upsert: true, session, new: true }
+            );
+
+            // ── 8. Increment contest submission count ────────────────────────
+            await Contest.findByIdAndUpdate(
+                contestId,
+                { $inc: { totalSubmissions: 1 }, $addToSet: { participants: userId } },
+                { session }
+            );
+
+            await session.commitTransaction();
+
+            // ── 9. Return response matching Flutter's UserEventSubmissionResponse ──
+            return res.status(201).json({
+                success: true,
+                message: 'Submission successful',
+                submission: {
+                    id: fileMeta._id.toString(),          // Flutter: Submission.id
+                    contestId: contestId,
+                    mediaType: mediaType,
+                    caption: caption || '',
+                    status: 'submitted',
+                    submittedAt: fileMeta.uploadedAt,
+                    file: {
+                        id: fileMeta._id.toString(),      // Flutter: FileClass.id
+                        mimeType: file.mimetype,
+                        mediaUrl: mediaUrl,
+                        thumbnailUrl: thumbnailUrl,
+                    }
+                }
+            });
+
+        } catch (err) {
+            await session.abortTransaction();
+            console.error('SUBMIT CONTEST ENTRY ERROR:', err);
+
+            // Handle duplicate key (race condition on double submit)
+            if (err.code === 11000) {
+                return res.status(400).json({ success: false, message: 'You have already submitted to this contest' });
+            }
+
+            return res.status(500).json({
+                success: false,
+                message: 'Failed to submit entry',
+                error: process.env.NODE_ENV === 'development' ? err.message : 'Internal server error'
+            });
+        } finally {
+            session.endSession();
+        }
     }
-});
+);
 
 // NEW ROUTE: Add to routes/contest.js
 router.get('/my', authMiddleware, async (req, res) => {

@@ -17,6 +17,8 @@ const Contest = require('../models/Contest');
 const ContestAppeal = require('../models/ContestAppeal');
 const Submission = require('../models/Submission');
 const fs = require('fs').promises;
+const Payment = require('../models/Payment');
+const { uploadToProvider } = require('../services/storageService');
 
 // ============================================
 // VALIDATION HELPERS
@@ -30,11 +32,56 @@ function validateObjectId(id, fieldName = 'id') {
 
 async function validateContest(contestId) {
     validateObjectId(contestId, 'contestId');
-    const contest = await Contest.findById(contestId).populate('rules');
+
+    // Populate the rules reference
+    let contest = await Contest.findById(contestId).populate('rules');
+
     if (!contest) throw new Error('Contest not found');
-    if (!contest.rules) throw new Error('Contest rules not configured');
+
+    // DEBUG: Log what we got
+    console.log('Contest found:', contest._id);
+    console.log('contest.rules before fix:', contest.rules ? 'exists' : 'missing');
+
+    // Handle case where rules is not set, not populated, or populated but empty
+    let effectiveRules = contest.rules;
+
+    // If rules is an ObjectId (not populated) or null/undefined
+    if (effectiveRules instanceof mongoose.Types.ObjectId || !effectiveRules) {
+        console.log('⚠️ Rules not populated or missing, attempting to fetch...');
+
+        // Try to fetch by contestId if rules reference exists
+        if (effectiveRules) {
+            const fetchedRules = await ContestRules.findById(effectiveRules);
+            if (fetchedRules) {
+                effectiveRules = fetchedRules;
+                contest.rules = fetchedRules; // Update contest object
+            }
+        }
+    }
+
+    // If still no valid rules, use defaults
+    if (!effectiveRules || typeof effectiveRules !== 'object' || !effectiveRules.theme) {
+        console.log('⚠️ Using default rules');
+        effectiveRules = {
+            theme: 'General',
+            keywords: [],
+            minEntropy: 0,
+            maxEntropy: null,
+            preferredColor: null,
+            skinRange: null,
+            allowPeople: true,
+            requireVertical: false,
+            maxDurationSeconds: null,
+            strictThemeMatch: false,
+            autoRejectNSFW: true
+        };
+        // Don't save defaults to DB, just use for this evaluation
+        contest.rules = effectiveRules;
+    }
+
     return contest;
 }
+
 
 // ============================================
 // MY CONTESTS
@@ -289,7 +336,8 @@ router.post('/evaluate',
             }
 
             uploadedFile = req.file.path;
-            const { contestId, entryId } = req.body;
+            const { contestId, caption } = req.body;
+            const userId = req.user.id;
 
             if (!contestId) {
                 return res.status(400).json({ success: false, error: 'contestId is required' });
@@ -297,56 +345,124 @@ router.post('/evaluate',
 
             const contest = await validateContest(contestId);
 
-            // Contest must be in active Phase 1 (before end date)
+            if (contest.entryFee > 0) {
+                const payment = await Payment.findOne({
+                    userId,
+                    contestId,
+                    status: 'verified'
+                });
+
+                if (!payment) {
+                    return res.status(403).json({
+                        success: false,
+                        error: 'Payment required before submission'
+                    });
+                }
+            }
+
             const now = new Date();
             if (now < contest.startDate || now > contest.endDate) {
-                return res.status(403).json({ success: false, error: 'Contest is not currently active' });
+                return res.status(403).json({
+                    success: false,
+                    error: 'Contest is not currently active'
+                });
             }
+
+            const entryId = new mongoose.Types.ObjectId();
 
             const contestRules = {
                 contestId: contest._id,
-                entryId: entryId || new mongoose.Types.ObjectId(),
-                userId: req.user.id,
-                theme: contest.rules.theme,
-                keywords: contest.rules.keywords,
-                minEntropy: contest.rules.minEntropy,
-                maxEntropy: contest.rules.maxEntropy,
+                entryId,
+                userId,
+                theme: contest.rules.theme || 'General',
+                keywords: contest.rules.keywords || [],
+                minEntropy: contest.rules.minEntropy || 0,
+                maxEntropy: contest.rules.maxEntropy ?? null,
                 preferredColor: contest.rules.preferredColor,
                 skinRange: contest.rules.skinRange,
                 allowPeople: contest.rules.allowPeople,
                 requireVertical: contest.rules.requireVertical,
                 maxDurationSeconds: contest.rules.maxDurationSeconds,
                 strictThemeMatch: contest.rules.strictThemeMatch,
-                autoRejectNSFW: contest.rules.autoRejectNSFW
+                autoRejectNSFW: contest.rules.autoRejectNSFW ?? true
             };
 
-            console.log(`📊 Evaluating media for contest ${contestId}...`);
-            const result = await evaluateMedia(req.file.path, req.file.mimetype, contestRules);
+            const result = await evaluateMedia(
+                req.file.path,
+                req.file.mimetype,
+                contestRules
+            );
 
-            // Persist submission for non-error verdicts
+            if (result.verdict === 'error') {
+                return res.status(400).json({ success: false, error: result.error });
+            }
+
+            let cloudFile = null;
+            if (result.verdict !== 'rejected') {
+                try {
+                    cloudFile = await uploadToProvider(req.file);
+                    uploadedFile = null;
+                } catch (uploadErr) {
+                    console.error('Cloudinary upload failed:', uploadErr);
+                    return res.status(500).json({ success: false, error: 'Media upload failed' });
+                }
+            }
+
+            const statusMap = {
+                'approved': 'submitted',  // or 'approved'
+                'rejected': 'rejected',
+                'review': 'pending',      // Map 'review' to 'pending' or add 'review' to schema
+                'error': 'pending'
+            };
+
             if (result.verdict !== 'error') {
+                const existing = await Submission.findOne({ userId, contestId });
+                if (existing) {
+                    return res.status(409).json({
+                        success: false,
+                        error: 'You have already submitted to this contest'
+                    });
+                }
+
                 await Submission.create({
                     contestId,
-                    userId: req.user.id,
-                    fileId: result.entryId || contestRules.entryId,
-                    status: result.verdict === 'approved' ? 'submitted' : result.verdict,
+                    userId,
+                    fileId: entryId,
+                    caption: caption || '',
+                    mediaUrl: cloudFile?.url || null,
+                    thumbnailUrl: cloudFile?.thumbnailUrl || null,
+                    cloudinaryPublicId: cloudFile?.publicId || null,
+                    mediaType: result.mediaType,
+                    status: statusMap[result.verdict] || 'pending',
                     verdict: result.verdict,
                     aiScore: result.score,
                     metadata: result.metadata
                 });
             }
 
-            res.json({ success: result.success, ...result });
+            res.json({
+                success: result.success,
+                ...result,
+                mediaUrl: cloudFile?.url || null
+            });
 
         } catch (error) {
-            console.error('Evaluation endpoint error:', error);
-            res.status(500).json({ success: false, error: error.message || 'Evaluation failed' });
+            console.error('Evaluation error:', error);
+
+            const statusCode =
+                error.message.includes('not configured') ||
+                    error.message.includes('Invalid')
+                    ? 400
+                    : 500;
+
+            res.status(statusCode).json({
+                success: false,
+                error: error.message
+            });
+
         } finally {
             if (uploadedFile) {
-                try {
-                    await fs.access(uploadedFile);
-                    await fs.unlink(uploadedFile);
-                } catch (_) { /* already deleted */ }
+                try { await fs.unlink(uploadedFile); } catch (_) { }
             }
         }
     }

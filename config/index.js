@@ -7,7 +7,6 @@ require('dotenv').config();
 // Validate required environment variables
 const requiredEnvVars = [
     'JWT_SECRET',
-    'HF_TOKEN',
     'MONGO_URI'
 ];
 
@@ -32,14 +31,8 @@ const APP_CONFIG = {
     jwtSecret: process.env.JWT_SECRET,
     jwtExpiry: process.env.JWT_EXPIRY || '7d',
 
-    // AI Services
-    enablePhase2: process.env.ENABLE_PHASE2 !== 'false', // true by default
-    huggingFaceToken: process.env.HF_TOKEN,
-
     // Thresholds
     phase1Threshold: Number(process.env.PHASE1_THRESHOLD) || 65,
-    nsfwThreshold: Number(process.env.NSFW_THRESHOLD) || 0.7,
-    themeThreshold: Number(process.env.THEME_THRESHOLD) || 0.4,
     duplicateHashThreshold: Number(process.env.DUPLICATE_HASH_THRESHOLD) || 10,
 
     // Video settings
