@@ -21,7 +21,6 @@ console.log(' Environment check:');
 console.log('PORT from Railway:', process.env.PORT);
 console.log('MONGO_URI exists?', !!process.env.MONGO_URI);
 console.log('BASE_URL:', process.env.BASE_URL);
-console.log('HF_TOKEN exists?', !!process.env.HF_TOKEN);
 
 // Validate critical environment variables
 const requiredEnvVars = ['MONGO_URI', 'JWT_SECRET'];
@@ -308,7 +307,6 @@ const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
   console.log(`🔗 Base URL: ${process.env.BASE_URL || `http://localhost:${PORT}`}`);
   console.log(`🤖 AI Phase-2: ${process.env.ENABLE_PHASE2 !== 'false' ? 'Enabled' : 'Disabled'}`);
-  console.log(`🔐 HF Token: ${process.env.HF_TOKEN ? 'Configured ✓' : 'Missing ✗'}`);
   console.log('='.repeat(60) + '\n');
 });
 
