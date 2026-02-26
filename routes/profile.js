@@ -157,110 +157,93 @@ router.get('/:userId/gallery', optionalAuth, async (req, res) => {
         const { userId } = req.params;
         const { page = 1, limit = 20 } = req.query;
 
-        // Validate ObjectId
         if (!mongoose.Types.ObjectId.isValid(userId)) {
-            return res.status(400).json({
-                success: false,
-                message: 'Invalid userId'
-            });
+            return res.status(400).json({ success: false, message: 'Invalid userId' });
         }
 
-        // Validate pagination params
         const pageNum = Math.max(1, parseInt(page));
         const limitNum = Math.min(50, Math.max(1, parseInt(limit)));
         const skip = (pageNum - 1) * limitNum;
 
-        // Fetch user data with location
+        // ── Fetch target user ─────────────────────────────────────────────────
         const targetUser = await User.findById(userId)
             .select('name firstName avatarUrl bio wins streakDays location')
             .lean();
 
         if (!targetUser) {
-            return res.status(404).json({
-                success: false,
-                message: 'User not found'
-            });
+            return res.status(404).json({ success: false, message: 'User not found' });
         }
 
-        // Build query - show all if viewing own profile, only public otherwise
-        const galleryQuery = {
-            createdBy: userId,
-            archived: false,
-        };
-
+        // ── Build file query ──────────────────────────────────────────────────
+        const galleryQuery = { createdBy: userId, archived: false };
         if (!viewerId || viewerId !== userId) {
             galleryQuery.visibility = 'public';
         }
 
-        // Get total count for pagination
         const totalCount = await FileMeta.countDocuments(galleryQuery);
 
-        // Fetch files with pagination
+        // ── Fetch files WITHOUT populate (safe) ───────────────────────────────
         const files = await FileMeta.find(galleryQuery)
             .sort({ uploadedAt: -1 })
             .skip(skip)
             .limit(limitNum)
-            .populate('createdBy', 'name firstName avatarUrl wins location')
-            .populate('event', 'title')
             .lean();
 
-        // Handle case when no files found
+        const emptyPagination = {
+            currentPage: pageNum,
+            totalPages: 0,
+            totalItems: 0,
+            itemsPerPage: limitNum,
+            hasMore: false,
+        };
+
         if (files.length === 0) {
             return res.json({
                 success: true,
-                user: {
-                    id: targetUser._id,
-                    name: targetUser.name || targetUser.firstName || 'Curator',
-                    wins: targetUser.wins || 0,
-                    avatarUrl: targetUser.avatarUrl || '',
-                    dateOfBirth: targetUser.dateOfBirth ? new Date(targetUser.dateOfBirth).getFullYear() : null,
-                    gender: targetUser.gender || null,
-                    bio: targetUser.bio || '',
-                    location: targetUser.location || {
-                        city: '',
-                        state: '',
-                        country: '',
-                        countryCode: ''
-                    }
-                },
+                user: _formatUser(targetUser),
                 gallery: [],
-                pagination: {
-                    currentPage: pageNum,
-                    totalPages: 0,
-                    totalItems: 0,
-                    itemsPerPage: limitNum,
-                    hasMore: false,
-                }
+                pagination: emptyPagination,
             });
         }
 
-        // Build liked/bookmarked sets for the viewer
+        // ── Safely resolve event refs ─────────────────────────────────────────
+        const eventIdStrings = [...new Set(
+            files
+                .map(f => f.event?.toString())
+                .filter(id => mongoose.Types.ObjectId.isValid(id))
+        )];
+
+        const eventMap = {};
+        if (eventIdStrings.length) {
+            const Contest = require('../models/Contest');
+            const events = await Contest.find(
+                { _id: { $in: eventIdStrings.map(id => new mongoose.Types.ObjectId(id)) } },
+                'title'
+            ).lean();
+            events.forEach(e => { eventMap[e._id.toString()] = e; });
+        }
+
+        // ── Liked / bookmarked sets ───────────────────────────────────────────
         let likedSet = new Set();
         let bookmarkedSet = new Set();
 
-        if (viewerId) {
+        if (viewerId && mongoose.Types.ObjectId.isValid(viewerId)) {
             const fileIds = files.map(f => f._id);
             const [likes, favs] = await Promise.all([
-                Like.find({
-                    userId: viewerId,
-                    fileId: { $in: fileIds }
-                }).distinct('fileId'),
-                Favorite.find({
-                    userId: viewerId,
-                    fileId: { $in: fileIds }
-                }).distinct('fileId')
+                Like.find({ userId: viewerId, fileId: { $in: fileIds } }).distinct('fileId'),
+                Favorite.find({ userId: viewerId, fileId: { $in: fileIds } }).distinct('fileId'),
             ]);
             likedSet = new Set(likes.map(id => id.toString()));
             bookmarkedSet = new Set(favs.map(id => id.toString()));
         }
 
-        // Build gallery items
+        // ── Build gallery ─────────────────────────────────────────────────────
+        // We use targetUser for creator info since all files belong to the same user
         const gallery = files.map(f => {
             const isVideo = f.mimeType?.startsWith('video/');
-            const user = f.createdBy || {};
-            const displayName = user.name || user.firstName || 'Curator';
-            // FIX: Define userLocation properly
-            const userLocation = user.location || {};
+            const eventId = f.event?.toString();
+            const event = mongoose.Types.ObjectId.isValid(eventId) ? (eventMap[eventId] ?? null) : null;
+            const location = targetUser.location || {};
 
             return {
                 id: f._id.toString(),
@@ -275,19 +258,18 @@ router.get('/:userId/gallery', optionalAuth, async (req, res) => {
                 },
                 videoUrl: isVideo ? f.path : null,
                 user: {
-                    id: user._id?.toString() || '',
-                    name: displayName,
-                    avatarUrl: user.avatarUrl || '',
-                    wins: user.wins || 0,
-                    // Include creator's location in gallery items
+                    id: targetUser._id.toString(),
+                    name: targetUser.name || targetUser.firstName || 'Curator',
+                    avatarUrl: targetUser.avatarUrl || '',
+                    wins: targetUser.wins || 0,
                     location: {
-                        city: userLocation.city || '',
-                        state: userLocation.state || '',
-                        country: userLocation.country || '',
-                        countryCode: userLocation.countryCode || ''
-                    }
+                        city: location.city || '',
+                        state: location.state || '',
+                        country: location.country || '',
+                        countryCode: location.countryCode || '',
+                    },
                 },
-                eventTitle: f.event?.title || 'General',
+                eventTitle: event?.title || 'General',
                 likes: f.likesCount || 0,
                 comments: f.commentsCount || 0,
                 isLiked: likedSet.has(f._id.toString()),
@@ -296,46 +278,39 @@ router.get('/:userId/gallery', optionalAuth, async (req, res) => {
             };
         });
 
-        // Calculate pagination info
-        const totalPages = Math.ceil(totalCount / limitNum);
-        const hasMore = pageNum < totalPages;
-
         res.json({
             success: true,
-            user: {
-                id: targetUser._id,
-                name: targetUser.name || targetUser.firstName || 'Curator',
-                wins: targetUser.wins || 0,
-                avatarUrl: targetUser.avatarUrl || '',
-                dateOfBirth: targetUser.dateOfBirth ? new Date(targetUser.dateOfBirth).getFullYear() : null,
-                gender: targetUser.gender || null,
-                bio: targetUser.bio || '',
-                streakDays: targetUser.streakDays || 0,
-                location: targetUser.location || {
-                    city: '',
-                    state: '',
-                    country: '',
-                    countryCode: ''
-                }
-            },
+            user: _formatUser(targetUser),
             gallery,
             pagination: {
                 currentPage: pageNum,
-                totalPages,
+                totalPages: Math.ceil(totalCount / limitNum),
                 totalItems: totalCount,
                 itemsPerPage: limitNum,
-                hasMore,
-            }
+                hasMore: pageNum < Math.ceil(totalCount / limitNum),
+            },
         });
 
     } catch (e) {
         console.error('PROFILE_GALLERY_ERROR', e);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to load gallery'
-        });
+        res.status(500).json({ success: false, message: 'Failed to load gallery' });
     }
 });
+
+// ── Small helper to avoid repeating the user shape ───────────────────────────
+function _formatUser(u) {
+    return {
+        id: u._id,
+        name: u.name || u.firstName || 'Curator',
+        wins: u.wins || 0,
+        avatarUrl: u.avatarUrl || '',
+        dateOfBirth: u.dateOfBirth ? new Date(u.dateOfBirth).toISOString() : null, // ← full ISO string
+        gender: u.gender || null,
+        bio: u.bio || '',
+        streakDays: u.streakDays || 0,
+        location: u.location || { city: '', state: '', country: '', countryCode: '' },
+    };
+}
 
 /**
  * PUT /api/profile/me
