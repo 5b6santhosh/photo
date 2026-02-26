@@ -1,55 +1,123 @@
-// routes/feed.js
 const express = require('express');
 const router = express.Router();
+const mongoose = require('mongoose');
+const { Types: { ObjectId } } = mongoose;
+
 const FileMeta = require('../models/FileMeta');
 const Like = require('../models/Like');
-const User = require('../models/User');
 const Following = require('../models/Following');
 
-router.get('/', async (req, res) => {
-    try {
-        const userId = req.user ? req.user.id : null;
+const isValidObjectId = (id) => id && mongoose.Types.ObjectId.isValid(id);
 
+router.get('/feed', async (req, res) => {
+    try {
+        const userId = req.user?.id ?? null;
+        const safeUserId = isValidObjectId(userId) ? userId : null;
+
+        // ── 1. Fetch public files (no populate — we do a safe manual lookup) ──
         const files = await FileMeta.find({
             archived: false,
-            visibility: 'public'
+            visibility: 'public',
         })
-            .populate('createdBy', 'name avatarUrl')
-            .populate('event', 'title startDate endDate createdBy') //  Added createdBy
             .sort({ uploadedAt: -1 })
             .limit(100)
             .lean();
 
-        const followingUserIds = userId
-            ? await Following.find({ follower: userId }).distinct('following')
+        // ── 2. Safely resolve createdBy (only valid ObjectIds) ────────────────
+        const creatorIdStrings = [...new Set(
+            files
+                .map(f => f.createdBy?.toString())
+                .filter(id => isValidObjectId(id))
+        )];
+
+        const User = mongoose.model('User');
+        const creators = creatorIdStrings.length
+            ? await User.find(
+                { _id: { $in: creatorIdStrings.map(id => new ObjectId(id)) } },
+                'name avatarUrl'
+            ).lean()
             : [];
 
-        //  Get actual like counts
-        const fileIds = files.map(f => f._id.toString());
-        const likeCounts = await Like.aggregate([
-            { $match: { fileId: { $in: fileIds.map(id => new ObjectId(id)) } } },
-            { $group: { _id: "$fileId", count: { $sum: 1 } } }
-        ]).then(results =>
-            results.reduce((acc, curr) => ({ ...acc, [curr._id.toString()]: curr.count }), {})
-        );
+        const creatorMap = creators.reduce((acc, u) => {
+            acc[u._id.toString()] = u;
+            return acc;
+        }, {});
 
+        // ── 3. Safely resolve event (only valid ObjectIds) ────────────────────
+        const eventIdStrings = [...new Set(
+            files
+                .map(f => f.event?.toString())
+                .filter(id => isValidObjectId(id))
+        )];
+
+        const Contest = require('../models/Contest');
+        const events = eventIdStrings.length
+            ? await Contest.find(
+                { _id: { $in: eventIdStrings.map(id => new ObjectId(id)) } },
+                'title startDate endDate createdBy contestStatus'
+            ).lean()
+            : [];
+
+        const eventMap = events.reduce((acc, e) => {
+            acc[e._id.toString()] = e;
+            return acc;
+        }, {});
+
+        // ── 4. Who does this user follow? ─────────────────────────────────────
+        const followingUserIds = safeUserId
+            ? (await Following.find({ follower: safeUserId }).distinct('following'))
+                .map(id => id.toString())
+            : [];
+
+        // ── 5. Aggregate like counts ──────────────────────────────────────────
+        const validFileObjectIds = files
+            .filter(f => isValidObjectId(f._id?.toString()))
+            .map(f => new ObjectId(f._id.toString()));
+
+        let likeCounts = {};
+        if (validFileObjectIds.length > 0) {
+            const aggregationResult = await Like.aggregate([
+                { $match: { fileId: { $in: validFileObjectIds } } },
+                { $group: { _id: '$fileId', count: { $sum: 1 } } }
+            ]);
+            likeCounts = aggregationResult.reduce((acc, curr) => ({
+                ...acc,
+                [curr._id.toString()]: curr.count
+            }), {});
+        }
+
+        // ── 6. Build feed items ───────────────────────────────────────────────
         const feed = files.map(f => {
-            const isVideo = f.mimeType?.startsWith('video/');
-            const fileId = f._id.toString();
+            if (!f._id) return null;
 
-            // Event status logic
+            const fileId = f._id.toString();
+            const isVideo = f.mimeType?.startsWith('video/') ?? false;
+
+            const createdByIdStr = f.createdBy?.toString();
+            const creator = isValidObjectId(createdByIdStr)
+                ? (creatorMap[createdByIdStr] ?? null)
+                : null;
+            const createdById = creator?._id?.toString() ?? null;
+
+            const eventIdStr = f.event?.toString();
+            const event = isValidObjectId(eventIdStr)
+                ? (eventMap[eventIdStr] ?? null)
+                : null;
+
             let eventStatus = 'general';
-            if (f.event) {
+            if (event) {
                 const now = new Date();
-                if (now < f.event.startDate) eventStatus = 'upcoming';
-                else if (now > f.event.endDate) eventStatus = 'completed';
-                else eventStatus = 'active';
+                const start = event.startDate ? new Date(event.startDate) : null;
+                const end = event.endDate ? new Date(event.endDate) : null;
+                if (start && end && !isNaN(start) && !isNaN(end)) {
+                    if (now < start) eventStatus = 'upcoming';
+                    else if (now > end) eventStatus = 'completed';
+                    else eventStatus = 'active';
+                }
             }
 
-            const isFromFollowing = followingUserIds.includes(f.createdBy?._id?.toString());
-
-            //  Now works because we populated event.createdBy
-            const isMyEvent = f.event?.createdBy?.toString() === userId;
+            const isMyEvent = !!(safeUserId && event?.createdBy?.toString() === safeUserId.toString());
+            const isFromFollowing = !!(createdById && followingUserIds.includes(createdById));
 
             return {
                 id: fileId,
@@ -57,43 +125,45 @@ router.get('/', async (req, res) => {
                 photo: {
                     id: fileId,
                     title: f.title || 'Untitled',
-                    imageUrl: isVideo ? f.thumbnailUrl : f.path,
+                    imageUrl: isVideo ? (f.thumbnailUrl || null) : (f.path || null),
                     category: f.category || 'other',
                 },
-                videoUrl: isVideo ? f.path : null,
-                eventTitle: f.event?.title || 'General',
-                eventStatus,      // 'active', 'upcoming', 'completed', 'general'
-                isMyEvent,        //  Now works
-                isFromFollowing,  // for "Following" tab
-                likes: likeCounts[fileId] || 0,  // Actual count
-                comments: f.commentsCount || 0,  // Or populate similarly
-                isLiked: false,   // Set below if userId exists
+                videoUrl: isVideo ? (f.path || null) : null,
+                eventTitle: event?.title || 'General',
+                eventStatus,
+                isMyEvent,
+                isFromFollowing,
+                isSubmission: f.isSubmission || false,
+                likes: likeCounts[fileId] || 0,
+                comments: f.commentsCount || 0,
+                isLiked: false,
                 user: {
-                    id: f.createdBy?._id?.toString() || null,
-                    name: f.createdBy?.name || "Anonymous",
-                    avatarUrl: f.createdBy?.avatarUrl || ""
+                    id: createdById || null,
+                    name: creator?.name || 'Anonymous',
+                    avatarUrl: creator?.avatarUrl || ''
                 }
             };
-        });
+        }).filter(Boolean);
 
-        if (userId) {
-            const likedFileIds = await Like.find({ userId })
-                .distinct('fileId')
-                .then(ids => ids.map(id => id.toString()));
-
+        // ── 7. Populate isLiked ───────────────────────────────────────────────
+        if (safeUserId) {
+            const likedFileIds = (await Like.find({ userId: safeUserId }).distinct('fileId'))
+                .map(id => id.toString());
             feed.forEach(item => {
                 item.isLiked = likedFileIds.includes(item.id);
             });
         }
 
-        res.status(200).json({
-            status: "success",
-            count: feed.length,
-            feed
-        });
+        return res.status(200).json({ status: 'success', count: feed.length, feed });
+
     } catch (e) {
-        console.error("FEED_API_ERROR:", e);
-        res.status(500).json({ status: "error", message: 'Feed error' });
+        console.error('FEED_API_ERROR:', e.message, e.stack);
+        return res.status(500).json({
+            status: 'error',
+            message: 'Feed error',
+            ...(process.env.NODE_ENV !== 'production' && { detail: e.message })
+        });
     }
 });
+
 module.exports = router;

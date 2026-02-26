@@ -381,7 +381,7 @@ router.get('/:contestId/entry-status', authMiddleware, async (req, res) => {
 router.post(
     '/:contestId/submit',
     authMiddleware,
-    upload.single('media'), 
+    upload.single('media'),
     async (req, res) => {
         const session = await mongoose.startSession();
         session.startTransaction();
@@ -508,6 +508,7 @@ router.post(
                 visibility: 'public',        // ← required for feed query
                 archived: false,             // ← required for feed query
                 title: caption || '',
+                category: contest.category || 'other',
                 cloudId: cloudId,
             }], { session });
 

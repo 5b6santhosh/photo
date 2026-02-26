@@ -93,7 +93,7 @@ app.use('/api/events', require('./routes/eventStories'));
 app.use('/api/contests', require('./routes/contestStories'));
 app.use('/api/search', require('./routes/search'));
 app.use('/api/reels', require('./routes/reels'));
-app.use('/api/feed', require('./routes/feed'));
+app.use('/api', require('./routes/feed'));
 app.use('/api/contest-submissions', require('./routes/userContestSubmissions'));
 app.use('/api/shares', require('./routes/shares'));
 app.use('/api/reports', require('./routes/reports'));

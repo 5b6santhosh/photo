@@ -60,15 +60,31 @@ router.post('/create-order', authMiddleware, async (req, res) => {
             contestId,
             status: { $in: ['pending', 'verified'] }
         });
-
         if (existingPayment) {
-            return res.status(400).json({
-                message: existingPayment.status === 'verified'
-                    ? 'You have already paid for this contest'
-                    : 'You already have a pending payment for this contest. Please wait.',
-                existingPaymentId: existingPayment.paymentId,
-                status: existingPayment.status
-            });
+
+            if (existingPayment.status === 'verified') {
+                return res.status(400).json({
+                    message: existingPayment.status === 'verified'
+                        ? 'You have already paid for this contest'
+                        : 'You already have a pending payment for this contest. Please wait.',
+                    existingPaymentId: existingPayment.paymentId,
+                    status: existingPayment.status
+                });
+            }
+
+            const ageMinutes = (Date.now() - existingPayment.createdAt) / 60000;
+            if (ageMinutes > 15) {
+                await Payment.findByIdAndUpdate(existingPayment._id, {
+                    $set: { status: 'cancelled', updatedAt: new Date() }
+                });
+            } else {
+                return res.status(400).json({
+                    message: 'You already have a pending payment. Please wait or retry.',
+                    existingPaymentId: existingPayment.paymentId,
+                    status: existingPayment.status
+                });
+            }
+
         }
 
         // Currencies that don't use decimal places (smallest unit = major unit)
@@ -330,12 +346,36 @@ router.post('/verify', authMiddleware, async (req, res) => {
             // message: 'Payment received. Verification in progress...',
             // status: 'processing'
             message: 'Payment verified successfully',
-            status: 'verified'  
+            status: 'verified'
         });
 
     } catch (err) {
         console.error(err);
         res.status(500).json({ verified: false });
+    }
+});
+
+router.post('/cancel', authMiddleware, async (req, res) => {
+    try {
+        const { orderId } = req.body;
+        const userId = req.user.id;
+
+        const updatedPayment = await Payment.findOneAndUpdate(
+            { orderId, userId, status: 'pending' },
+            { $set: { status: 'cancelled', updatedAt: new Date() } },
+            { new: true }
+        );
+
+        if (!updatedPayment) {
+            return res.status(404).json({
+                success: false,
+                message: "Order not found or already processed."
+            });
+        }
+
+        res.json({ success: true });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
     }
 });
 
