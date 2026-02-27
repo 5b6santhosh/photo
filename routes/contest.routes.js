@@ -19,6 +19,7 @@ const Submission = require('../models/Submission');
 const fs = require('fs').promises;
 const Payment = require('../models/Payment');
 const { uploadToProvider } = require('../services/storageService');
+const ContestEntry = require('../models/ContestEntry');
 
 // ============================================
 // VALIDATION HELPERS
@@ -345,8 +346,12 @@ router.post('/evaluate',
 
             const contest = await validateContest(contestId);
 
+            // ============================================
+            // FIX: Fetch payment record if entryFee > 0
+            // ============================================
+            let payment = null;
             if (contest.entryFee > 0) {
-                const payment = await Payment.findOne({
+                payment = await Payment.findOne({
                     userId,
                     contestId,
                     status: 'verified'
@@ -368,23 +373,60 @@ router.post('/evaluate',
                 });
             }
 
+            // ============================================
+            // CHECK FOR EXISTING ENTRY
+            // ============================================
+
+            const existingContestEntry = await ContestEntry.findOne({
+                userId,
+                contestId
+            });
+
+            if (existingContestEntry) {
+                if (['pending', 'submitted', 'approved', 'verified'].includes(existingContestEntry.status)) {
+                    return res.status(409).json({
+                        success: false,
+                        error: 'You have already submitted to this contest',
+                        existingEntry: {
+                            id: existingContestEntry._id,
+                            status: existingContestEntry.status,
+                            submittedAt: existingContestEntry.createdAt
+                        }
+                    });
+                }
+            }
+
+            const existingSubmission = await Submission.findOne({ userId, contestId });
+            if (existingSubmission) {
+                if (['pending', 'submitted', 'approved', 'verified'].includes(existingSubmission.status)) {
+                    return res.status(409).json({
+                        success: false,
+                        error: 'You have already submitted to this contest',
+                        existingSubmission: {
+                            id: existingSubmission._id,
+                            status: existingSubmission.status
+                        }
+                    });
+                }
+            }
+
             const entryId = new mongoose.Types.ObjectId();
 
             const contestRules = {
                 contestId: contest._id,
                 entryId,
                 userId,
-                theme: contest.rules.theme || 'General',
-                keywords: contest.rules.keywords || [],
-                minEntropy: contest.rules.minEntropy || 0,
-                maxEntropy: contest.rules.maxEntropy ?? null,
-                preferredColor: contest.rules.preferredColor,
-                skinRange: contest.rules.skinRange,
-                allowPeople: contest.rules.allowPeople,
-                requireVertical: contest.rules.requireVertical,
-                maxDurationSeconds: contest.rules.maxDurationSeconds,
-                strictThemeMatch: contest.rules.strictThemeMatch,
-                autoRejectNSFW: contest.rules.autoRejectNSFW ?? true
+                theme: contest.rules?.theme || 'General',
+                keywords: contest.rules?.keywords || [],
+                minEntropy: contest.rules?.minEntropy || 0,
+                maxEntropy: contest.rules?.maxEntropy ?? null,
+                preferredColor: contest.rules?.preferredColor,
+                skinRange: contest.rules?.skinRange,
+                allowPeople: contest.rules?.allowPeople,
+                requireVertical: contest.rules?.requireVertical,
+                maxDurationSeconds: contest.rules?.maxDurationSeconds,
+                strictThemeMatch: contest.rules?.strictThemeMatch,
+                autoRejectNSFW: contest.rules?.autoRejectNSFW ?? true
             };
 
             const result = await evaluateMedia(
@@ -409,41 +451,93 @@ router.post('/evaluate',
             }
 
             const statusMap = {
-                'approved': 'submitted',  // or 'approved'
-                'rejected': 'rejected',
-                'review': 'pending',      // Map 'review' to 'pending' or add 'review' to schema
-                'error': 'pending'
+                'approved': 'submitted',
+                'rejected': 'disqualified',
+                'review': 'submitted',
+                'error': 'submitted'
             };
 
+            const finalStatus = statusMap[result.verdict] || 'pending';
+
+            // ============================================
+            // FIX: Include paymentId in entry data
+            // ============================================
+
             if (result.verdict !== 'error') {
-                const existing = await Submission.findOne({ userId, contestId });
-                if (existing) {
-                    return res.status(409).json({
-                        success: false,
-                        error: 'You have already submitted to this contest'
-                    });
+
+                // Build base entry data
+                const contestEntryData = {
+                    userId,
+                    contestId,
+                    status: finalStatus,
+                    photos: [],
+                    videos: [],
+                    submittedAt: new Date(),
+                    updatedAt: new Date(),
+                    aiScore: result.score,
+                    verdict: result.verdict,
+                    // FIX: Add paymentId (required field)
+                    paymentId: payment?._id || null,
+                    metadata: {
+                        ...result.metadata,
+                        caption: caption || '',
+                        mediaUrl: cloudFile?.url || null,
+                        thumbnailUrl: cloudFile?.thumbnailUrl || null,
+                        cloudinaryPublicId: cloudFile?.publicId || null,
+                        mediaType: result.mediaType,
+                        entryId: entryId
+                    }
+                };
+
+                // Add file reference based on type
+                if (result.mediaType === 'image') {
+                    contestEntryData.photos.push(entryId);
+                } else {
+                    contestEntryData.videos.push(entryId);
                 }
 
-                await Submission.create({
-                    contestId,
-                    userId,
-                    fileId: entryId,
-                    caption: caption || '',
-                    mediaUrl: cloudFile?.url || null,
-                    thumbnailUrl: cloudFile?.thumbnailUrl || null,
-                    cloudinaryPublicId: cloudFile?.publicId || null,
-                    mediaType: result.mediaType,
-                    status: statusMap[result.verdict] || 'pending',
-                    verdict: result.verdict,
-                    aiScore: result.score,
-                    metadata: result.metadata
-                });
+                let savedEntry;
+                if (existingContestEntry) {
+                    // Update existing entry - keep existing paymentId if present
+                    contestEntryData.paymentId = existingContestEntry.paymentId || payment?._id || null;
+                    savedEntry = await ContestEntry.findByIdAndUpdate(
+                        existingContestEntry._id,
+                        { $set: contestEntryData },
+                        { new: true }
+                    );
+                } else {
+                    savedEntry = await ContestEntry.create(contestEntryData);
+                }
+
+                // Also create Submission record
+                await Submission.findOneAndUpdate(
+                    { userId, contestId },
+                    {
+                        $set: {
+                            contestId,
+                            userId,
+                            fileId: entryId,
+                            caption: caption || '',
+                            mediaUrl: cloudFile?.url || null,
+                            thumbnailUrl: cloudFile?.thumbnailUrl || null,
+                            cloudinaryPublicId: cloudFile?.publicId || null,
+                            mediaType: result.mediaType,
+                            status: finalStatus,
+                            verdict: result.verdict,
+                            aiScore: result.score,
+                            metadata: result.metadata,
+                            updatedAt: new Date()
+                        }
+                    },
+                    { upsert: true, new: true }
+                );
             }
 
             res.json({
                 success: result.success,
                 ...result,
-                mediaUrl: cloudFile?.url || null
+                mediaUrl: cloudFile?.url || null,
+                entryId: entryId
             });
 
         } catch (error) {

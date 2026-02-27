@@ -18,12 +18,13 @@ const ContestEntrySchema = new mongoose.Schema({
     paymentId: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'Payment',
-        required: true
+        required: false,
+        default: null
     },
 
     status: {
         type: String,
-        enum: ['paid', 'submitted', 'refunded', 'disqualified'],
+        enum: ['paid', 'submitted', 'disqualified', 'refunded', 'pending', 'rejected'],
         default: 'paid',
         index: true
     },

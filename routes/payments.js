@@ -19,12 +19,22 @@ router.post('/create-order', authMiddleware, async (req, res) => {
     let contestId;
     let userId;
     try {
-        const { contestId: bodyContestId, countryCode } = req.body;
+        const { contestId: bodyContestId } = req.body;
         contestId = bodyContestId;
         userId = req.user.id;
 
         if (!contestId || !mongoose.Types.ObjectId.isValid(contestId)) {
             return res.status(400).json({ message: 'Invalid contest ID' });
+        }
+
+        const user = await User.findById(userId).select('location');
+        if (!user) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+        const countryCode = user.location?.countryCode || 'IN';
+
+        if (!user.location?.countryCode) {
+            console.warn(`User ${userId} has no countryCode in profile, defaulting to IN`);
         }
 
         const contest = await Contest.findById(contestId);
@@ -142,7 +152,8 @@ router.post('/create-order', authMiddleware, async (req, res) => {
                     currency,
                     fxRate,
                     amountInTargetCurrency,
-                    finalAmount
+                    finalAmount,
+                    countryCode
                 }
             });
         }
@@ -155,6 +166,13 @@ router.post('/create-order', authMiddleware, async (req, res) => {
             fxRate,
             multiplier,
             amountInTargetCurrency,
+            finalAmount
+        });
+        console.log('Creating order:', {
+            receipt,
+            countryCode,
+            currency,
+            baseInINR,
             finalAmount
         });
 
@@ -203,7 +221,8 @@ router.post('/create-order', authMiddleware, async (req, res) => {
                 amount: finalAmount,
                 currency,
                 key: process.env.RAZORPAY_KEY_ID,
-                contestId: contestId.toString()
+                contestId: contestId.toString(),
+                countryCode
             });
 
         } catch (orderErr) {

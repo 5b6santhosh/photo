@@ -87,16 +87,34 @@ router.post('/signup', async (req, res) => {
       lastOtpSentAt: new Date()
     });
 
-    await mailService.sendMail({
-      to: email,
-      subject: "Activate Your Photo Curator Account",
-      html: `
+    // await mailService.sendMail({
+    //   to: email,
+    //   subject: "Activate Your Photo Curator Account",
+    //   html: `
+    //     <h2>Welcome to Photo Curator 📸</h2>
+    //     <p>Your OTP is:</p>
+    //     <h1>${plainOTP}</h1>
+    //     <p>This code expires in 5 minutes.</p>
+    //   `
+    // });
+    setImmediate(async () => {
+      try {
+        await mailService.sendMail({
+          to: email,
+          subject: "Activate Your Photo Curator Account",
+          html: `
         <h2>Welcome to Photo Curator 📸</h2>
         <p>Your OTP is:</p>
         <h1>${plainOTP}</h1>
         <p>This code expires in 5 minutes.</p>
       `
+        });
+        console.log(`OTP email sent to ${email}`);
+      } catch (err) {
+        console.error("Failed to send OTP email:", err);
+      }
     });
+
 
     res.status(200).json({
       success: true,
@@ -111,9 +129,6 @@ router.post('/signup', async (req, res) => {
     });
   }
 });
-
-
-
 
 router.post('/verify', async (req, res) => {
   try {
@@ -137,7 +152,7 @@ router.post('/verify', async (req, res) => {
       });
     }
 
-    // ⏳ Expiry check
+    //  Expiry check
     if (tempUser.otpExpiresAt < new Date()) {
       await Temp_signup.deleteOne({ _id: tempUser._id });
       return res.status(400).json({
@@ -421,6 +436,20 @@ router.delete('/delete-account', authMiddleware, async (req, res) => {
       success: false,
       message: "Failed to delete account"
     });
+  }
+});
+
+router.patch('/promote/:id', authMiddleware, requireAdmin, async (req, res) => {
+  try {
+    const updatedUser = await User.findByIdAndUpdate(
+      req.params.id,
+      { role: 'admin', badgeTier: 'master' },
+      { new: true }
+    ).select('-password');
+
+    res.json({ success: true, user: updatedUser });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
   }
 });
 
