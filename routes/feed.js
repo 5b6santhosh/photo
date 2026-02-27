@@ -146,8 +146,18 @@ router.get('/feed', async (req, res) => {
         }).filter(Boolean);
 
         // ── 7. Populate isLiked ───────────────────────────────────────────────
+        // if (safeUserId) {
+        //     const likedFileIds = (await Like.find({ userId: safeUserId }).distinct('fileId'))
+        //         .map(id => id.toString());
+        //     feed.forEach(item => {
+        //         item.isLiked = likedFileIds.includes(item.id);
+        //     });
+        // }
+        // ── 7. Populate isLiked ───────────────────────────────────────────────
         if (safeUserId) {
-            const likedFileIds = (await Like.find({ userId: safeUserId }).distinct('fileId'))
+            const likedFileIds = (await Like.find({
+                userId: new ObjectId(safeUserId) 
+            }).distinct('fileId'))
                 .map(id => id.toString());
             feed.forEach(item => {
                 item.isLiked = likedFileIds.includes(item.id);
