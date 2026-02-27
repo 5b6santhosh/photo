@@ -229,9 +229,17 @@ router.get('/:userId/gallery', optionalAuth, async (req, res) => {
 
         if (viewerId && mongoose.Types.ObjectId.isValid(viewerId)) {
             const fileIds = files.map(f => f._id);
+            const viewerObjectId = new mongoose.Types.ObjectId(viewerId);
+
             const [likes, favs] = await Promise.all([
-                Like.find({ userId: viewerId, fileId: { $in: fileIds } }).distinct('fileId'),
-                Favorite.find({ userId: viewerId, fileId: { $in: fileIds } }).distinct('fileId'),
+                Like.find({
+                    userId: viewerObjectId,
+                    fileId: { $in: fileIds }
+                }).distinct('fileId'),
+                Favorite.find({
+                    userId: viewerObjectId,
+                    fileId: { $in: fileIds }
+                }).distinct('fileId'),
             ]);
             likedSet = new Set(likes.map(id => id.toString()));
             bookmarkedSet = new Set(favs.map(id => id.toString()));
