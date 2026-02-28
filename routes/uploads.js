@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path'); // Optional, for better path handling
 const FileMeta = require('../models/FileMeta');
 const { uploadToProvider } = require('../services/storageService');
-const { authMiddleware } = require('../middleware/auth');
+const { authMiddleware, optionalAuth } = require('../middleware/auth');
 
 const router = express.Router();
 
@@ -16,7 +16,7 @@ const upload = multer({ dest: 'temp/' });
 router.use(authMiddleware);
 
 
-router.post('/', upload.single('file'), async (req, res) => {
+router.post('/', authMiddleware, upload.single('file'), async (req, res) => {
   let tempFilePath = null;
 
   try {

@@ -97,29 +97,33 @@ router.post('/signup', async (req, res) => {
     //     <p>This code expires in 5 minutes.</p>
     //   `
     // });
-    setImmediate(async () => {
-      try {
-        await mailService.sendMail({
-          to: email,
-          subject: "Activate Your Photo Curator Account",
-          html: `
-        <h2>Welcome to Photo Curator 📸</h2>
-        <p>Your OTP is:</p>
-        <h1>${plainOTP}</h1>
-        <p>This code expires in 5 minutes.</p>
-      `
-        });
-        console.log(`OTP email sent to ${email}`);
-      } catch (err) {
-        console.error("Failed to send OTP email:", err);
-      }
-    });
+    try {
+      await mailService.sendMail({
+        to: email,
+        subject: "Activate Your Photo Curator Account",
+        html: `
+      <h2>Welcome to Photo Curator 📸</h2>
+      <p>Your OTP is:</p>
+      <h1>${plainOTP}</h1>
+      <p>This code expires in 5 minutes.</p>
+    `
+      });
 
+      console.log(`OTP email sent to ${email}`);
 
-    res.status(200).json({
-      success: true,
-      message: "OTP sent to your email"
-    });
+      return res.status(200).json({
+        success: true,
+        message: "OTP sent to your email"
+      });
+
+    } catch (mailError) {
+      console.error("Failed to send OTP email:", mailError);
+
+      return res.status(500).json({
+        success: false,
+        message: "Failed to send OTP email. Please try again."
+      });
+    }
 
   } catch (err) {
     console.error("Signup Error:", err);
