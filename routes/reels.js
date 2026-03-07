@@ -327,8 +327,8 @@ router.get('/feed/swipe', async (req, res) => {
         const userId = req.user?.id ?? null;
         const safeUserId = isValidObjectId(userId) ? userId : null;
 
-        const seedId = req.query.seedId;           // The item user tapped
-        const sessionId = req.query.sessionId;     // UUID from Flutter, for stable shuffle
+        const seedId = req.query.seedId;
+        const sessionId = req.query.sessionId;
         const page = parseInt(req.query.page) || 0;
         const limit = Math.min(parseInt(req.query.limit) || 10, 20);
         const source = req.query.source || 'explore';
@@ -338,11 +338,14 @@ router.get('/feed/swipe', async (req, res) => {
         const matchQuery = { archived: false, visibility: 'public' };
 
         // ── Following filter ──────────────────────────────────────────────────
-        let followingSet = new Set();
+        let followingIds = [];   // raw ObjectIds for DB query
+        let followingSet = new Set();  // strings for Set.has() lookup
         if (source === 'following' && safeUserId) {
-            const ids = await Following.find({ follower: safeUserId }).distinct('following');
-            followingSet = new Set(ids.map(id => id.toString()));
-            matchQuery.createdBy = { $in: [...ids] };
+            followingIds = await Following.find({
+                follower: new mongoose.Types.ObjectId(safeUserId)
+            }).distinct('following');
+            followingSet = new Set(followingIds.map(id => id.toString()));
+            matchQuery.createdBy = { $in: followingIds };
         }
 
         // ── Event filter ──────────────────────────────────────────────────────
@@ -351,36 +354,30 @@ router.get('/feed/swipe', async (req, res) => {
             if (eventFilter === 'active') eventQuery = { startDate: { $lte: now }, endDate: { $gte: now } };
             if (eventFilter === 'upcoming') eventQuery = { startDate: { $gt: now } };
             if (eventFilter === 'completed') eventQuery = { endDate: { $lt: now } };
-            if (eventFilter === 'myEvents' && safeUserId) eventQuery = { createdBy: safeUserId };
-
+            if (eventFilter === 'myEvents' && safeUserId) {
+                eventQuery = { createdBy: new mongoose.Types.ObjectId(safeUserId) };
+            }
             const events = await Contest.find(eventQuery).select('_id');
             matchQuery.event = { $in: events.map(e => e._id) };
         }
 
-        // ── Exclude seed on page > 0 (it's always page 0 item 0) ─────────────
-        // We'll manually prepend the seed only on page 0
-        const excludeIds = [];
+        // ── Exclude seed ──────────────────────────────────────────────────────
         if (seedId && isValidObjectId(seedId)) {
-            excludeIds.push(new mongoose.Types.ObjectId(seedId));
-        }
-        if (excludeIds.length) {
-            matchQuery._id = { $nin: excludeIds };
+            matchQuery._id = { $nin: [new mongoose.Types.ObjectId(seedId)] };
         }
 
-        // ── Scored aggregation ────────────────────────────────────────────────
-        // sessionHash: turns sessionId string into a small integer for $mod shuffle
-        // This makes the random offset stable for the same session across paginations
-        const sessionHash = sessionId
-            ? sessionId.split('').reduce((acc, c) => acc + c.charCodeAt(0), 0) % 97
-            : Math.floor(Math.random() * 97);
-
+        // ── Scored + ranked aggregation ───────────────────────────────────────
         const files = await FileMeta.aggregate([
             { $match: matchQuery },
             {
                 $addFields: {
-                    ageInDays: { $divide: [{ $subtract: [now, '$uploadedAt'] }, 86400000] },
                     freshnessBoost: {
-                        $max: [0, { $subtract: [30, { $divide: [{ $subtract: [now, '$uploadedAt'] }, 86400000] }] }]
+                        $max: [0, {
+                            $subtract: [
+                                30,
+                                { $divide: [{ $subtract: [now, '$uploadedAt'] }, 86400000] }
+                            ]
+                        }]
                     }
                 }
             },
@@ -388,8 +385,8 @@ router.get('/feed/swipe', async (req, res) => {
                 $addFields: {
                     engagementScore: {
                         $add: [
-                            { $multiply: ['$likesCount', 3] },
-                            { $multiply: ['$commentsCount', 2] },
+                            { $multiply: [{ $ifNull: ['$likesCount', 0] }, 3] },
+                            { $multiply: [{ $ifNull: ['$commentsCount', 0] }, 2] },
                             { $ifNull: ['$sharesCount', 0] },
                             '$freshnessBoost'
                         ]
@@ -405,50 +402,96 @@ router.get('/feed/swipe', async (req, res) => {
             { $sort: { shuffleBucket: -1, sessionTiebreak: 1 } },
             { $skip: page * limit },
             { $limit: limit },
+
+            // ── JOIN user — use pipeline to select only needed fields ──────────
             {
                 $lookup: {
                     from: 'users',
-                    localField: 'createdBy',
+                    localField: 'createdBy',   // still the raw ObjectId at this point
                     foreignField: '_id',
-                    as: 'createdBy',
+                    as: 'userInfo',
+                    pipeline: [
+                        {
+                            $project: {
+                                _id: 1,
+                                username: 1,
+                                firstName: 1,
+                                lastName: 1,
+                                avatarUrl: 1,
+                                wins: 1
+                            }
+                        }
+                    ]
                 }
             },
-            { $unwind: { path: '$createdBy', preserveNullAndEmptyArrays: true } },
+            { $unwind: { path: '$userInfo', preserveNullAndEmptyArrays: true } },
+
+            // ── JOIN contest/event ─────────────────────────────────────────────
             {
                 $lookup: {
                     from: 'contests',
                     localField: 'event',
                     foreignField: '_id',
-                    as: 'event',
+                    as: 'eventInfo',
+                    pipeline: [
+                        {
+                            $project: {
+                                _id: 1,
+                                title: 1,
+                                startDate: 1,
+                                endDate: 1,
+                                createdBy: 1
+                            }
+                        }
+                    ]
                 }
             },
-            { $unwind: { path: '$event', preserveNullAndEmptyArrays: true } },
+            { $unwind: { path: '$eventInfo', preserveNullAndEmptyArrays: true } },
         ]);
 
         // ── Liked + Bookmarked sets ───────────────────────────────────────────
+        // FIX: Cast safeUserId and fileIds to ObjectId to guarantee match
         let likedSet = new Set();
         let bookmarkedSet = new Set();
         if (safeUserId && files.length) {
-            const fileIds = files.map(f => f._id);
+            const fileIds = files.map(f => f._id); // already ObjectIds from aggregate
+            const userObjectId = new mongoose.Types.ObjectId(safeUserId);
+
             const [liked, favorites] = await Promise.all([
-                Like.find({ userId: safeUserId, fileId: { $in: fileIds } }).distinct('fileId'),
-                Favorite.find({ userId: safeUserId, fileId: { $in: fileIds } }).distinct('fileId'),
+                Like.find({
+                    userId: userObjectId,
+                    fileId: { $in: fileIds }
+                }).distinct('fileId'),
+                Favorite.find({
+                    userId: userObjectId,
+                    fileId: { $in: fileIds }
+                }).distinct('fileId'),
             ]);
             likedSet = new Set(liked.map(id => id.toString()));
             bookmarkedSet = new Set(favorites.map(id => id.toString()));
         }
 
-        // ── If page 0, prepend the seed item ─────────────────────────────────
+        // ── Seed item (page 0 only) ───────────────────────────────────────────
         let seedReel = null;
         if (page === 0 && seedId && isValidObjectId(seedId)) {
             const seedFile = await FileMeta.findById(seedId)
-                .populate('createdBy', 'name avatarUrl wins')
+                .populate('createdBy', 'username firstName lastName avatarUrl wins')
                 .populate('event', 'title startDate endDate createdBy')
                 .lean();
-            if (seedFile) seedReel = formatReel(seedFile, safeUserId, likedSet, bookmarkedSet, followingSet, now);
+
+            if (seedFile) {
+                // Normalize .populate() shape → aggregation shape
+                seedFile.userInfo = seedFile.createdBy || null;
+                seedFile.eventInfo = seedFile.event || null;
+                seedReel = formatReel(
+                    seedFile, safeUserId, likedSet, bookmarkedSet, followingSet, now
+                );
+            }
         }
 
-        const feed = files.map(f => formatReel(f, safeUserId, likedSet, bookmarkedSet, followingSet, now));
+        const feed = files.map(f =>
+            formatReel(f, safeUserId, likedSet, bookmarkedSet, followingSet, now)
+        );
         const finalFeed = seedReel ? [seedReel, ...feed] : feed;
 
         res.json({
@@ -467,12 +510,42 @@ router.get('/feed/swipe', async (req, res) => {
 // ── Shared formatter ──────────────────────────────────────────────────────────
 function formatReel(f, safeUserId, likedSet, bookmarkedSet, followingSet, now) {
     const isVideo = f.mimeType?.startsWith('video/');
+    const user = f.userInfo || null;
+    const event = f.eventInfo || null;
+
+    // Build display name — User schema has no 'name' field
+    const displayName = user
+        ? (
+            [user.firstName, user.lastName].filter(s => s && s.trim()).join(' ').trim()
+            || user.username
+            || 'Unknown'
+        )
+        : 'Unknown';
+
+    // Event status — only meaningful when event is actually linked
     let eventStatus = 'general';
-    if (f.event) {
-        if (now < new Date(f.event.startDate)) eventStatus = 'upcoming';
-        else if (now > new Date(f.event.endDate)) eventStatus = 'completed';
+    if (event?.startDate && event?.endDate) {
+        const start = new Date(event.startDate);
+        const end = new Date(event.endDate);
+        if (now < start) eventStatus = 'upcoming';
+        else if (now > end) eventStatus = 'completed';
         else eventStatus = 'active';
     }
+
+    // FIX: creatorIdStr must come from userInfo._id (the joined doc), not f.createdBy
+    // After aggregation $unwind, f.createdBy is still the raw ObjectId — use userInfo
+    const creatorIdStr = user?._id?.toString() || '';
+
+    // FIX: isMyEvent — compare event.createdBy (ObjectId) to safeUserId (string)
+    const isMyEvent = !!(
+        safeUserId &&
+        event?.createdBy &&
+        event.createdBy.toString() === safeUserId.toString()
+    );
+
+    // FIX: isFromFollowing — must compare against creatorIdStr from userInfo
+    const isFromFollowing = followingSet.size > 0 && followingSet.has(creatorIdStr);
+
     return {
         id: f._id.toString(),
         mediaType: isVideo ? 'reel' : 'image',
@@ -485,19 +558,25 @@ function formatReel(f, safeUserId, likedSet, bookmarkedSet, followingSet, now) {
             imageUrl: isVideo ? (f.thumbnailUrl || f.path) : f.path,
         },
         videoUrl: isVideo ? f.path : null,
-        eventTitle: f.event?.title || 'General',
+
+        // FIX: eventTitle/eventStatus only non-default when event is actually linked in FileMeta
+        eventTitle: event?.title || 'General',
         eventStatus,
-        isMyEvent: !!(safeUserId && f.event?.createdBy?.toString() === safeUserId),
-        isFromFollowing: followingSet.has(f.createdBy?._id?.toString()),
+        isMyEvent,
+        isFromFollowing,
+
         likes: f.likesCount || 0,
         comments: f.commentsCount || 0,
+
+        // FIX: Cast _id to string before Set.has() — aggregate returns BSON ObjectIds
         isLiked: likedSet.has(f._id.toString()),
         isBookmarked: bookmarkedSet.has(f._id.toString()),
+
         user: {
-            id: f.createdBy?._id?.toString() || '',
-            name: f.createdBy?.name || 'Curator',
-            avatarUrl: f.createdBy?.avatarUrl || '',
-            wins: f.createdBy?.wins || 0,
+            id: creatorIdStr,
+            name: displayName,
+            avatarUrl: user?.avatarUrl || '',
+            wins: user?.wins || 0,
         },
     };
 }

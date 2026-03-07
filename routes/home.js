@@ -11,8 +11,15 @@ const isValidObjectId = (id) => {
     return mongoose.Types.ObjectId.isValid(id);
 };
 
-function formatHighlightPhoto(photo, contestEndDate) {
+function formatHighlightPhoto(photo, contestEndDate, options = {}) {
     if (!photo) return null;
+
+    const {
+        isCurated = photo.isCurated || false,
+        userName = photo.userName || null,
+        isLiked = photo.isLiked || false,
+        isFavorite = photo.isFavorite || false
+    } = options;
 
     return {
         id: photo._id.toString(),
@@ -25,11 +32,15 @@ function formatHighlightPhoto(photo, contestEndDate) {
         peopleCount: photo.peopleCount || 0,
         category: photo.category || 'other',
         likesCount: photo.likesCount || 0,
-        isFavorite: false,
+        isFavorite: isFavorite,
         aspectRatio: photo.aspectRatio || 9 / 16,
         blurHash: photo.blurHash || null,
+        userName: userName,
+        isCurated: isCurated,
+        isLiked: isLiked,
     };
 }
+
 
 function formatTimeLabel(startDate, endDate) {
     const now = new Date();
@@ -45,7 +56,7 @@ function formatTimeLabel(startDate, endDate) {
     }
 }
 
-function mapContest(contest, userId, photoMap, submissionStats) {
+function mapContest(contest, userId, photoMap, submissionStats, userMap = {}) {
     const now = new Date();
     const startDate = new Date(contest.startDate);
     const endDate = new Date(contest.endDate);
@@ -64,7 +75,16 @@ function mapContest(contest, userId, photoMap, submissionStats) {
     const highlightPhotos = (contest.highlightPhotos || [])
         .map(id => {
             const photo = photoMap[id.toString()];
-            return photo ? formatHighlightPhoto(photo, endDate) : null;
+            if (!photo) return null;
+
+            // Get username from userMap if available (for curated photos)
+            const photoUserName = userMap[photo.createdBy?.toString()] || null;
+
+            return formatHighlightPhoto(photo, endDate, {
+                isCurated: true, // Highlight photos are curated
+                userName: photoUserName,
+                isLiked: false // You can implement like checking here if needed
+            });
         })
         .filter(p => p !== null);
 
@@ -147,11 +167,26 @@ router.get('/', async (req, res) => {
                 photos.forEach(p => {
                     photoMap[p._id.toString()] = p;
                 });
+                const creatorIds = [...new Set(photos
+                    .map(p => p.createdBy?.toString())
+                    .filter(id => id && isValidObjectId(id))
+                )];
+
+                if (creatorIds.length > 0) {
+                    const creators = await User.find({
+                        _id: { $in: creatorIds }
+                    }).select('name').lean();
+
+                    creators.forEach(c => {
+                        userMap[c._id.toString()] = c.name;
+                    });
+                }
+
             }
         }
 
         // 5. Map contests
-        const events = contests.map(c => mapContest(c, userId, photoMap, submissionStats));
+        const events = contests.map(c => mapContest(c, userId, photoMap, submissionStats, userMap));
 
         // 6. Hero event
         const heroEvent = events.find(e => e.isActive) ||

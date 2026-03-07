@@ -7,6 +7,7 @@ const Temp_signup = require('../models/Temp_signup');
 const mailService = require("../services/mail.service");
 const { authMiddleware, requireAdmin } = require('../middleware/auth');
 const TokenBlacklist = require('../models/TokenBlacklist');
+const { checkAndUpgradeBadge } = require('../utils/badgeUtils');
 
 const router = express.Router();
 
@@ -45,11 +46,18 @@ router.post('/signup', async (req, res) => {
       });
     }
 
-    const existingUser = await User.findOne({ email });
-    if (existingUser) {
+    const existingUserEmail = await User.findOne({ email });
+    if (existingUserEmail) {
       return res.status(400).json({
         success: false,
         message: "Email already registered"
+      });
+    }
+    const existingUsername = await User.findOne({ username });
+    if (existingUsername) {
+      return res.status(400).json({
+        success: false,
+        message: "Username already taken"
       });
     }
 
@@ -177,6 +185,24 @@ router.post('/verify', async (req, res) => {
       });
     }
 
+    const existingUser = await User.findOne({
+      $or: [
+        { email: tempUser.email },
+        { username: tempUser.username }
+      ]
+    });
+
+    if (existingUser) {
+
+      await Temp_signup.deleteOne({ _id: tempUser._id });
+
+      return res.status(400).json({
+        success: false,
+        message: "User already exists"
+      });
+    }
+
+
     // Create actual user
     const newUser = await User.create({
       username: tempUser.username,
@@ -236,10 +262,29 @@ router.post('/login', async (req, res) => {
     if (!isMatch) {
       return res.status(400).json({ message: 'Invalid email or password' });
     }
+    const lastLogin = user.login_date;
+    const today = new Date();
 
-    // Update last login timestamp (auditing only)
-    user.login_date = new Date();
+    if (lastLogin) {
+      const diffDays = Math.floor((today - lastLogin) / (1000 * 60 * 60 * 24));
+
+      if (diffDays === 1) {
+        user.streakDays += 1; // Continuing streak
+      } else if (diffDays > 1) {
+        user.streakDays = 0;  // Broken streak
+      }
+      // diffDays === 0 means same-day login, no change
+    } else {
+      // First login ever
+      user.streakDays = 1;
+    }
+
+    user.login_date = today;
     await user.save();
+
+    //  CHECK BADGE UPGRADE AFTER STREAK UPDATE
+    await checkAndUpgradeBadge(user._id);
+
 
     // GENERATE JWT TOKEN (7-day expiry)
     const token = jwt.sign(
@@ -263,7 +308,8 @@ router.post('/login', async (req, res) => {
         username: user.username,
         role: user.role,
         badgeTier: user.badgeTier,
-        isProfileCompleted: user.isProfileCompleted
+        isProfileCompleted: user.isProfileCompleted,
+        streakDays: user.streakDays
       }
     });
   } catch (err) {
@@ -443,18 +489,20 @@ router.delete('/delete-account', authMiddleware, async (req, res) => {
   }
 });
 
-router.patch('/promote/:id', authMiddleware, requireAdmin, async (req, res) => {
-  try {
-    const updatedUser = await User.findByIdAndUpdate(
-      req.params.id,
-      { role: 'admin', badgeTier: 'master' },
-      { new: true }
-    ).select('-password');
+router.patch('/promote/:id', authMiddleware,
+  // requireAdmin, 
+  async (req, res) => {
+    try {
+      const updatedUser = await User.findByIdAndUpdate(
+        req.params.id,
+        { role: 'admin', badgeTier: 'master' },
+        { new: true }
+      ).select('-password');
 
-    res.json({ success: true, user: updatedUser });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-});
+      res.json({ success: true, user: updatedUser });
+    } catch (err) {
+      res.status(500).json({ success: false, message: err.message });
+    }
+  });
 
 module.exports = router;

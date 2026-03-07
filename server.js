@@ -103,6 +103,7 @@ app.use('/api/admin/events', require('./routes/admin/createAdminEvents'));
 
 app.use('/api/payments', require('./routes/payments'));
 app.use('/api/follow', require('./routes/follow'));
+app.use('/api/favorites', require('./routes/favorites'));
 
 // ============================================
 // ROUTES - MEDIA EVALUATION (NEW)
@@ -204,6 +205,22 @@ app.use((err, req, res, next) => {
   });
 });
 
+async function runAutoMigrations() {
+  const FileMeta = require('./models/FileMeta');
+
+  // Check if migration needed
+  const needsMigration = await FileMeta.exists({ isLiked: { $exists: false } });
+
+  if (needsMigration) {
+    console.log('Running auto-migration for FileMeta fields...');
+    await FileMeta.updateMany(
+      { isLiked: { $exists: false } },
+      { $set: { isLiked: false, isFavorite: false, userName: null } }
+    );
+    console.log('Auto-migration complete');
+  }
+}
+
 // ============================================
 // DATABASE CONNECTION
 // ============================================
@@ -216,6 +233,7 @@ mongoose
   .then(() => {
     console.log(' MongoDB connected successfully');
     console.log(` Database: ${mongoose.connection.name}`);
+    runAutoMigrations().catch(console.error);
   })
   .catch((err) => {
     console.error(' MongoDB connection FAILED:', err.message);

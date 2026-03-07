@@ -20,7 +20,8 @@ const fs = require('fs').promises;
 const Payment = require('../models/Payment');
 const { uploadToProvider } = require('../services/storageService');
 const ContestEntry = require('../models/ContestEntry');
-
+const { checkAndUpgradeBadge } = require('../utils/badgeUtils');
+const FileMeta = require('../models/FileMeta');
 // ============================================
 // VALIDATION HELPERS
 // ============================================
@@ -307,6 +308,15 @@ router.post('/:contestId/select-winners',
                 });
             }
 
+            for (const sel of enrichedSelections) {
+                if (sel.position === 1) {
+                    // Increment wins count
+                    await User.findByIdAndUpdate(sel.userId, { $inc: { wins: 1 } });
+                    // CHECK BADGE UPGRADE AFTER WIN INCREMENT
+                    await checkAndUpgradeBadge(sel.userId);
+                }
+            }
+
             res.json({
                 success: true,
                 message: 'Winners selected successfully',
@@ -383,7 +393,10 @@ router.post('/evaluate',
             });
 
             if (existingContestEntry) {
-                if (['pending', 'submitted', 'approved', 'verified'].includes(existingContestEntry.status)) {
+                const isEvaluated = existingContestEntry.aiScore != null;
+                const isTerminal = ['approved', 'verified'].includes(existingContestEntry.status);
+
+                if (isEvaluated || isTerminal) {
                     return res.status(409).json({
                         success: false,
                         error: 'You have already submitted to this contest',
@@ -398,7 +411,10 @@ router.post('/evaluate',
 
             const existingSubmission = await Submission.findOne({ userId, contestId });
             if (existingSubmission) {
-                if (['pending', 'submitted', 'approved', 'verified'].includes(existingSubmission.status)) {
+                const isEvaluated = existingSubmission.aiScore != null;
+                const isTerminal = ['approved', 'verified'].includes(existingSubmission.status);
+
+                if (isEvaluated || isTerminal) {
                     return res.status(409).json({
                         success: false,
                         error: 'You have already submitted to this contest',
@@ -440,10 +456,32 @@ router.post('/evaluate',
             }
 
             let cloudFile = null;
+            let fileMeta = null;
             if (result.verdict !== 'rejected') {
                 try {
                     cloudFile = await uploadToProvider(req.file);
                     uploadedFile = null;
+                    if (result.verdict !== 'rejected' && cloudFile) {
+                        fileMeta = await FileMeta.create({
+                            fileName: cloudFile.publicId,
+                            originalName: req.file.originalname,
+                            mimeType: req.file.mimetype,
+                            size: req.file.size,
+                            path: cloudFile.url,
+                            cloudId: cloudFile.publicId,
+                            thumbnailUrl: cloudFile.thumbnailUrl || null,
+                            createdBy: userId,
+                            description: caption || '',
+                            isSubmission: true,
+                            isVideo: result.mediaType === 'video',
+                            visibility: 'public',
+                            archived: false,
+                            event: contestId,
+                            title: caption || '',
+                            category: contest.allowedMediaTypes?.[0] || 'other',
+                        });
+                    }
+
                 } catch (uploadErr) {
                     console.error('Cloudinary upload failed:', uploadErr);
                     return res.status(500).json({ success: false, error: 'Media upload failed' });
@@ -516,7 +554,7 @@ router.post('/evaluate',
                         $set: {
                             contestId,
                             userId,
-                            fileId: entryId,
+                            fileId: fileMeta?._id || entryId,
                             caption: caption || '',
                             mediaUrl: cloudFile?.url || null,
                             thumbnailUrl: cloudFile?.thumbnailUrl || null,

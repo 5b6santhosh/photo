@@ -11,7 +11,9 @@ const FileMeta = require('../models/FileMeta');
 const Submission = require('../models/Submission');
 const ContestEntry = require('../models/ContestEntry');
 const Payment = require('../models/Payment');
+const User = require('../models/User');
 const { uploadToProvider, deleteFromProvider } = require('../services/storageService');
+const { checkAndUpgradeBadge } = require('../utils/badgeUtils');
 
 // Use temp storage for cloud upload
 const TEMP_UPLOAD_DIR = 'temp';
@@ -182,7 +184,12 @@ router.post('/:id/submit', auth, contestUpload, upload.single('media'), async (r
             createdBy: userId,
             description: caption || '',
             isSubmission: true,
-            contestId
+            isVideo: mediaType === 'video',
+            visibility: 'public',
+            archived: false,
+            event: contestId,
+            title: caption || '',
+            category: contest.allowedMediaTypes[0] || 'other',
         });
 
         await fileMeta.save({ session });
@@ -227,18 +234,25 @@ router.post('/:id/submit', auth, contestUpload, upload.single('media'), async (r
             },
             { session }
         );
+        const oldTier = await User.findById(userId).select('badgeTier').lean();
 
         // Commit transaction
         await session.commitTransaction();
+        await checkAndUpgradeBadge(userId);
 
         // Clean up temp file
         if (tempFilePath && fs.existsSync(tempFilePath)) {
             fs.unlinkSync(tempFilePath);
         }
+        const user = await User.findById(userId).select('badgeTier').lean();
+        const tierUpgraded = user.badgeTier !== oldTier.badgeTier;
+
 
         res.status(201).json({
             success: true,
-            message: 'Submission successful',
+            message: tierUpgraded ? `Submission successful! You are now ${user.badgeTier}!` : 'Submission successful',
+            tierUpgraded,
+            badgeTier: user.badgeTier,
             submission: {
                 id: submission._id,
                 contestId: submission.contestId,

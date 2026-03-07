@@ -14,8 +14,16 @@ const multer = require('multer');
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
 
-function formatHighlightPhoto(photo, contestEndDate) {
+function formatHighlightPhoto(photo, contestEndDate, options = {}) {
     if (!photo) return null;
+
+    const {
+        isCurated = photo.isCurated || false,
+        userName = photo.userName || null,
+        isLiked = photo.isLiked || false,
+        isFavorite = photo.isFavorite || false
+    } = options;
+
 
     return {
         id: photo._id?.toString() || photo.id?.toString() || '',
@@ -28,9 +36,12 @@ function formatHighlightPhoto(photo, contestEndDate) {
         peopleCount: photo.peopleCount || 0,
         category: photo.category || 'other',
         likesCount: photo.likesCount || 0,
-        isFavorite: false,
+        isFavorite: isFavorite,
         aspectRatio: photo.aspectRatio || 9 / 16,
         blurHash: photo.blurHash || null,
+        userName: userName,
+        isCurated: isCurated,
+        isLiked: isLiked,
     };
 }
 
@@ -92,7 +103,9 @@ router.get('/:contestId/details', authMiddleware, async (req, res) => {
             photos.forEach(p => photoMap[p._id.toString()] = p);
 
             highlightPhotos = contest.highlightPhotos
-                .map(id => formatHighlightPhoto(photoMap[id.toString()], contest.endDate))
+                .map(id => formatHighlightPhoto(photoMap[id.toString()], contest.endDate, {
+                    isCurated: true
+                }))
                 .filter(p => p !== null);
         }
 
@@ -122,7 +135,10 @@ router.get('/:contestId/details', authMiddleware, async (req, res) => {
                         _id: { $in: entry.photos }
                     }).lean();
 
-                    userSubmissions = photoDocs.map(p => formatHighlightPhoto(p, contest.endDate));
+                    userSubmissions = photoDocs.map(p => formatHighlightPhoto(p, contest.endDate, {
+                        isCurated: false,
+                        userName: entry.userName || req.user?.name || 'Anonymous'
+                    }));
                 }
             }
 
@@ -133,6 +149,18 @@ router.get('/:contestId/details', authMiddleware, async (req, res) => {
             }).lean();
 
             if (submission && !contestEntry) {
+                // FIXED: Also fetch FileMeta for Submission model
+                let submissionPhotos = [];
+                if (submission.fileId) {
+                    const fileDoc = await FileMeta.findById(submission.fileId).lean();
+                    if (fileDoc) {
+                        submissionPhotos = [formatHighlightPhoto(fileDoc, contest.endDate, {
+                            isCurated: false,
+                            userName: req.user?.name || req.user?.username || 'You'
+                        })];
+                    }
+                }
+
                 contestEntry = {
                     id: submission._id.toString(),
                     status: submission.status || 'submitted',
@@ -140,8 +168,12 @@ router.get('/:contestId/details', authMiddleware, async (req, res) => {
                     photos: submission.photos || [submission.fileId].filter(Boolean),
                     videos: submission.videos || [],
                 };
+
+                userSubmissions = submissionPhotos;
             }
         }
+
+
 
         // Payment status (only if authenticated)
         let paymentStatus = null;

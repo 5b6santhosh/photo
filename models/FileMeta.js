@@ -1,11 +1,11 @@
 const mongoose = require('mongoose');
 
 const FileMetaSchema = new mongoose.Schema({
-  fileName: { type: String, required: true },      // saved file name on disk
-  originalName: { type: String, required: true },  // original client file name
+  fileName: { type: String, required: true },
+  originalName: { type: String, required: true },
   mimeType: { type: String, required: true },
   size: { type: Number, required: true },
-  path: { type: String, required: true },          // relative or absolute path
+  path: { type: String, required: true },
   createdBy: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
@@ -20,7 +20,7 @@ const FileMetaSchema = new mongoose.Schema({
   likesCount: { type: Number, default: 0 },
   commentsCount: { type: Number, default: 0 },
   sharesCount: { type: Number, default: 0 },
-  // uploadedAt: { type: Date, default: Date.now },
+  reportsCount: { type: Number, default: 0 },
   event: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Contest',
@@ -38,7 +38,6 @@ const FileMetaSchema = new mongoose.Schema({
     enum: ['public', 'private'],
     default: 'public',
     index: true
-
   },
   title: { type: String, default: '' },
   subtitle: { type: String, default: '' },
@@ -52,6 +51,9 @@ const FileMetaSchema = new mongoose.Schema({
   blurHash: { type: String },
   isCurated: { type: Boolean, default: false },
 
+  isLiked: { type: Boolean, default: false },
+  isFavorite: { type: Boolean, default: false },
+  userName: { type: String },
 
 }, {
   timestamps: { createdAt: 'uploadedAt', updatedAt: 'updatedAt' }
@@ -61,6 +63,8 @@ FileMetaSchema.index({ event: 1, isSubmission: 1 });
 FileMetaSchema.index({ createdBy: 1, uploadedAt: -1 });
 FileMetaSchema.index({ visibility: 1, likesCount: -1, uploadedAt: -1 });
 FileMetaSchema.index({ isCurated: 1, uploadedAt: -1 });
-
+FileMetaSchema.index({ createdBy: 1, isLiked: 1 });
+FileMetaSchema.index({ createdBy: 1, isFavorite: 1 });
+FileMetaSchema.index({ reportsCount: -1 });
 
 module.exports = mongoose.model('FileMeta', FileMetaSchema);

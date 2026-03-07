@@ -1,8 +1,8 @@
-// routes/shares.js
 const express = require('express');
 const Share = require('../models/Share');
 const FileMeta = require('../models/FileMeta');
 const mongoose = require('mongoose');
+const { authMiddleware } = require('../middleware/auth');
 
 const router = express.Router();
 
@@ -11,57 +11,116 @@ const router = express.Router();
  * Tracks unique shares per authenticated user
  * @body { fileId: string }
  * @auth Required (req.user.id)
+ * @returns { success: boolean, sharesCount: number, alreadyShared: boolean }
  */
-router.post('/track', async (req, res) => {
+router.post('/track', authMiddleware, async (req, res) => {
     try {
-        const userId = req.user?.id; // From auth middleware
+        const userId = req.user.id;
         const { fileId } = req.body;
 
-        //  Require authentication
-        if (!userId) {
-            return res.status(401).json({ error: 'Authentication required' });
-        }
-
-        //  Validate inputs
+        // Validate inputs
         if (!fileId) {
-            return res.status(400).json({ error: 'fileId required' });
-        }
-        if (!mongoose.Types.ObjectId.isValid(fileId)) {
-            return res.status(400).json({ error: 'Invalid fileId' });
+            return res.status(400).json({
+                success: false,
+                error: 'fileId required'
+            });
         }
 
-        //  Verify file exists and is public
+        if (!mongoose.Types.ObjectId.isValid(fileId)) {
+            return res.status(400).json({
+                success: false,
+                error: 'Invalid fileId'
+            });
+        }
+
+        // Verify file exists and is accessible
         const file = await FileMeta.findOne({
             _id: fileId,
             archived: false,
-            visibility: 'public'
+            $or: [
+                { visibility: 'public' },
+                { createdBy: userId }
+            ]
         });
+
         if (!file) {
-            return res.status(404).json({ error: 'File not found' });
+            return res.status(404).json({
+                success: false,
+                error: 'File not found'
+            });
         }
 
-        //  Create share record (fails silently if duplicate due to unique index)
-        await Share.findOneAndUpdate(
-            { userId, fileId },
-            { userId, fileId },
-            { upsert: true, new: true }
-        );
+        // Try to create share record
+        let isNewShare = false;
 
-        //  Increment sharesCount ONLY if this is a new share
-        // (Handle via post-save hook or check result - simplified here)
-        await FileMeta.findByIdAndUpdate(fileId, {
-            $inc: { sharesCount: 1 }
+        try {
+            await Share.create({ userId, fileId });
+            isNewShare = true;
+        } catch (err) {
+            if (err.code === 11000) {
+                // Duplicate key - already shared
+                isNewShare = false;
+            } else {
+                throw err;
+            }
+        }
+
+        // Only increment sharesCount if this is a NEW share
+        let finalSharesCount = file.sharesCount || 0;
+
+        if (isNewShare) {
+            const updatedFile = await FileMeta.findByIdAndUpdate(
+                fileId,
+                { $inc: { sharesCount: 1 } },
+                { new: true }
+            );
+            finalSharesCount = updatedFile.sharesCount;
+        }
+
+        res.json({
+            success: true,
+            sharesCount: finalSharesCount,
+            alreadyShared: !isNewShare
         });
-
-        res.json({ success: true, sharesCount: file.sharesCount + 1 });
 
     } catch (err) {
-        if (err.code === 11000) {
-            // Duplicate key error (already shared)
-            return res.json({ success: true, message: 'Already shared' });
-        }
         console.error('Share track error:', err);
-        res.status(500).json({ error: 'Failed to track share' });
+        res.status(500).json({
+            success: false,
+            error: 'Failed to track share',
+            message: err.message
+        });
+    }
+});
+
+/**
+ * GET /api/shares/count/:fileId
+ * Get share count for a file (public)
+ */
+router.get('/count/:fileId', async (req, res) => {
+    try {
+        const { fileId } = req.params;
+
+        if (!mongoose.Types.ObjectId.isValid(fileId)) {
+            return res.status(400).json({
+                success: false,
+                error: 'Invalid fileId'
+            });
+        }
+
+        const file = await FileMeta.findById(fileId).select('sharesCount');
+
+        res.json({
+            success: true,
+            sharesCount: file?.sharesCount || 0
+        });
+
+    } catch (err) {
+        console.error('Get share count error:', err);
+        res.status(500).json({
+            success: false,
+            error: 'Failed to get share count'
+        });
     }
 });
 
