@@ -104,6 +104,7 @@ app.use('/api/admin/events', require('./routes/admin/createAdminEvents'));
 app.use('/api/payments', require('./routes/payments'));
 app.use('/api/follow', require('./routes/follow'));
 app.use('/api/favorites', require('./routes/favorites'));
+app.use('/api/contest-favorites', require('./routes/contestFavorites'));
 
 // ============================================
 // ROUTES - MEDIA EVALUATION (NEW)
