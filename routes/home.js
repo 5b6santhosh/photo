@@ -111,6 +111,7 @@ router.get('/', async (req, res) => {
     try {
         const rawUserId = req.user?.id || null;
         const userId = (rawUserId && isValidObjectId(rawUserId)) ? rawUserId : null;
+        const userMap = {};
 
         // 1. User wins
         let userWins = 0;
