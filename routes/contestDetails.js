@@ -35,7 +35,7 @@ function formatHighlightPhoto(photo, contestEndDate, options = {}) {
     const url = toFullUrl(photo.path || photo.url);
     const thumbnailUrl = toFullUrl(photo.thumbnailPath || photo.thumbnailUrl) || url;
 
-    if (!url) return null;  
+    if (!url) return null;
 
     return {
         id: photo._id?.toString() || photo.id?.toString() || '',
@@ -757,13 +757,18 @@ router.get('/:contestId/overview', authMiddleware, async (req, res) => {
         }
 
         // ── 3. User's submissions for this contest ────────────────────────────────
-        const mySubmissions = await Submission.find({ contestId, userId })
+        const mySubmissions = await Submission.find({
+            contestId: new mongoose.Types.ObjectId(contestId),
+            userId: new mongoose.Types.ObjectId(userId),
+        })
             .populate('fileId', 'thumbnailUrl path title')
             .sort({ createdAt: -1 })
             .lean();
 
         // ── 4. Total entry count ──────────────────────────────────────────────────
-        const totalEntries = await Submission.countDocuments({ contestId });
+        const totalEntries = await Submission.countDocuments({
+            contestId: new mongoose.Types.ObjectId(contestId),
+        });
 
         // ── 5. Placement ──────────────────────────────────────────────────────────
         const mySubmissionIds = mySubmissions.map((s) => s._id.toString());
@@ -774,8 +779,8 @@ router.get('/:contestId/overview', authMiddleware, async (req, res) => {
 
         if (mySubmissionIds.length > 0) {
             judgeDecision = await JudgeDecision.findOne({
-                contestId,
-                entryId: { $in: mySubmissionIds },
+                contestId: new mongoose.Types.ObjectId(contestId),
+                entryId: { $in: mySubmissionIds.map(id => new mongoose.Types.ObjectId(id)) },
                 finalDecision: 'winner',
             }).lean();
 
@@ -794,24 +799,22 @@ router.get('/:contestId/overview', authMiddleware, async (req, res) => {
         // ── 7. Highlights (only after results are visible) ────────────────────────
         let highlights = [];
         if (resultsVisible) {
-            const topEntries = await getTopEntriesForReview({ contestId, limit: 30 });
+            const topEntries = await Submission.find({
+                contestId: new mongoose.Types.ObjectId(contestId),
+                status: { $in: ['shortlisted', 'winner', 'approved'] },
+            })
+                .sort({ aiScore: -1, votes: -1 })
+                .limit(10)
+                .populate('fileId', 'thumbnailUrl')
+                .lean();
 
-            highlights = await Promise.all(
-                topEntries.qualified.slice(0, 10).map(async (e) => {
-                    const sub = await Submission.findById(e.entryId)
-                        .populate('fileId', 'thumbnailUrl')
-                        .lean();
-
-                    return {
-                        entryId: e.entryId,
-                        thumbnailUrl: sub?.fileId?.thumbnailUrl ?? null,
-                        rank: e.preliminaryRank ?? null,
-                        aiScore: e.scores?.final ?? null,
-                        // Compare as strings to avoid ObjectId/string mismatch
-                        isMyEntry: e.userId?.toString() === userId.toString(),
-                    };
-                })
-            );
+            highlights = topEntries.map(e => ({
+                entryId: e._id.toString(),
+                thumbnailUrl: e.fileId?.thumbnailUrl ?? e.thumbnailUrl ?? null,
+                rank: e.prizePosition ?? null,
+                aiScore: e.aiScore ?? null,
+                isMyEntry: e.userId?.toString() === userId.toString(),
+            }));
         }
 
         // ── 8. Timeline ───────────────────────────────────────────────────────────
