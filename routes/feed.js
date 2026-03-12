@@ -64,10 +64,25 @@ router.get('/feed', async (req, res) => {
         }, {});
 
         // ── 4. Who does this user follow? ─────────────────────────────────────
-        const followingUserIds = safeUserId
-            ? (await Following.find({ follower: safeUserId }).distinct('following'))
-                .map(id => id.toString())
-            : [];
+        let followingUserIds = [];
+        if (safeUserId) {
+            try {
+                const followingDocs = await Following.find({
+                    follower: new ObjectId(safeUserId)
+                })
+                    .select('following')
+                    .lean();
+
+                followingUserIds = followingDocs
+                    .map(doc => doc.following?.toString())
+                    .filter(Boolean); // remove any nulls
+
+                console.log(`[FEED] userId=${safeUserId} follows ${followingUserIds.length} users:`, followingUserIds);
+            } catch (followErr) {
+                console.error('[FEED] Error fetching following list:', followErr.message);
+                // Non-fatal — continue with empty following list
+            }
+        }
 
         // ── 5. Aggregate like counts ──────────────────────────────────────────
         const validFileObjectIds = files
@@ -117,7 +132,10 @@ router.get('/feed', async (req, res) => {
             }
 
             const isMyEvent = !!(safeUserId && event?.createdBy?.toString() === safeUserId.toString());
-            const isFromFollowing = !!(createdById && followingUserIds.includes(createdById));
+            const isFromFollowing = !!(
+                createdById &&
+                followingUserIds.includes(createdById)
+            );
 
             return {
                 id: fileId,
@@ -156,13 +174,16 @@ router.get('/feed', async (req, res) => {
         // ── 7. Populate isLiked ───────────────────────────────────────────────
         if (safeUserId) {
             const likedFileIds = (await Like.find({
-                userId: new ObjectId(safeUserId) 
+                userId: new ObjectId(safeUserId)
             }).distinct('fileId'))
                 .map(id => id.toString());
             feed.forEach(item => {
                 item.isLiked = likedFileIds.includes(item.id);
             });
         }
+
+        const followingCount = feed.filter(i => i.isFromFollowing).length;
+        console.log(`[FEED] total=${feed.length}, fromFollowing=${followingCount}, userId=${safeUserId}`);
 
         return res.status(200).json({ status: 'success', count: feed.length, feed });
 

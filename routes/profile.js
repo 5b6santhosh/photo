@@ -715,4 +715,155 @@ router.put('/me/location', auth, async (req, res) => {
     }
 });
 
+// ── GET /curators/:id/profile ─────────────────────────────────────────────────
+router.get('/curators/:id/profile', async (req, res) => {
+    try {
+        const { id: curatorId } = req.params;
+        const userId = req.user?.id ?? null;
+        const safeUserId = isValidObjectId(userId) ? userId : null;
+
+        if (!isValidObjectId(curatorId)) {
+            return res.status(400).json({ status: 'error', message: 'Invalid curator ID' });
+        }
+
+        const User = require('../models/User');
+        const Following = require('../models/Following');
+
+        const curator = await User.findById(curatorId)
+            .select('_id name avatarUrl wins')
+            .lean();
+
+        if (!curator) {
+            return res.status(404).json({ status: 'error', message: 'Curator not found' });
+        }
+
+        // Follower count
+        const followerCount = await Following.countDocuments({ following: curatorId });
+
+        // Is the requesting user already following this curator?
+        let isFollowing = false;
+        if (safeUserId) {
+            const follow = await Following.findOne({
+                follower: safeUserId,
+                following: curatorId,
+            }).lean();
+            isFollowing = !!follow;
+        }
+
+        return res.json({
+            status: 'success',
+            curator: {
+                id: curator._id.toString(),
+                name: curator.name || 'Curator',
+                avatarUrl: curator.avatarUrl || '',
+                wins: curator.wins || 0,
+                followerCount,
+                isFollowing,
+            },
+        });
+    } catch (err) {
+        console.error('CURATOR_PROFILE_ERROR:', err);
+        return res.status(500).json({ status: 'error', message: 'Failed to load curator profile' });
+    }
+});
+
+// ── GET /curators/:id/reels ───────────────────────────────────────────────────
+router.get('/curators/:id/reels', async (req, res) => {
+    try {
+        const { id: curatorId } = req.params;
+        const userId = req.user?.id ?? null;
+        const safeUserId = isValidObjectId(userId) ? userId : null;
+
+        const page = Math.max(parseInt(req.query.page) || 1, 1);
+        const limit = Math.min(parseInt(req.query.limit) || 12, 60);
+        const skip = (page - 1) * limit;
+
+        if (!isValidObjectId(curatorId)) {
+            return res.status(400).json({ status: 'error', message: 'Invalid curator ID' });
+        }
+
+        const now = new Date();
+
+        // ── Fetch + paginate ──────────────────────────────────────────────────
+        const [reels, total] = await Promise.all([
+            FileMeta.find({
+                archived: false,
+                visibility: 'public',
+                isCurated: true,
+                createdBy: curatorId,
+            })
+                .sort({ likesCount: -1, uploadedAt: -1 })
+                .skip(skip)
+                .limit(limit)
+                .populate({
+                    path: 'createdBy',
+                    select: 'username firstName lastName avatarUrl wins',
+                })
+                .populate({
+                    path: 'event',
+                    select: 'title startDate endDate createdBy',
+                })
+                .lean(),
+
+            FileMeta.countDocuments({
+                archived: false,
+                visibility: 'public',
+                isCurated: true,
+                createdBy: curatorId,
+            }),
+        ]);
+
+        // ── Liked + Bookmarked sets ───────────────────────────────────────────
+        let likedSet = new Set();
+        let bookmarkedSet = new Set();
+        if (safeUserId && reels.length) {
+            const fileIds = reels.map(r => r._id);
+            const userObjectId = new mongoose.Types.ObjectId(safeUserId);
+
+            const [liked, favorites] = await Promise.all([
+                Like.find({
+                    userId: userObjectId,
+                    fileId: { $in: fileIds },
+                }).distinct('fileId'),
+                Favorite.find({
+                    userId: userObjectId,
+                    fileId: { $in: fileIds },
+                }).distinct('fileId'),
+            ]);
+
+            likedSet = new Set(liked.map(id => id.toString()));
+            bookmarkedSet = new Set(favorites.map(id => id.toString()));
+        }
+
+        // ── Normalize .populate() shape to match formatReel() ─────────────────
+        // formatReel() expects f.userInfo and f.eventInfo (aggregation shape)
+        // .populate() puts them in f.createdBy and f.event — so remap here
+        const normalized = reels.map(r => ({
+            ...r,
+            userInfo: r.createdBy || null,   // remap for formatReel
+            eventInfo: r.event || null,   // remap for formatReel
+        }));
+
+        const followingSet = new Set(); // curator grid doesn't need followingSet
+        const formatted = normalized.map(f =>
+            formatReel(f, safeUserId, likedSet, bookmarkedSet, followingSet, now)
+        );
+
+        return res.json({
+            status: 'success',
+            reels: formatted,
+            pagination: {
+                total,
+                page,
+                limit,
+                totalPages: Math.ceil(total / limit),
+                hasMore: skip + reels.length < total,
+            },
+        });
+    } catch (err) {
+        console.error('CURATOR_REELS_ERROR:', err);
+        return res.status(500).json({ status: 'error', message: 'Failed to load reels' });
+    }
+});
+
 module.exports = router;

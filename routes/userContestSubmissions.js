@@ -85,6 +85,11 @@ router.post('/:id/submit', auth, contestUpload, upload.single('media'), async (r
             });
         }
 
+        const alreadySubmission = await Submission.findOne({ contestId, userId });
+        if (alreadySubmission) {
+            return res.status(400).json({ message: 'You have already submitted to this contest' });
+        }
+
         // Start transaction
         session = await mongoose.startSession();
         session.startTransaction();
@@ -213,14 +218,28 @@ router.post('/:id/submit', auth, contestUpload, upload.single('media'), async (r
         // UPDATE CONTEST ENTRY (only for paid contests)
         // ─────────────────────────────────────────────
         // FIXED: Single update, not double
+        // UPDATE CONTEST ENTRY (only for paid contests)
+        const mediaField = mediaType === 'video' ? 'videos' : 'photos';
+
         if (contestEntry) {
+            // PAID contest — update existing ContestEntry
             await ContestEntry.findByIdAndUpdate(
                 contestEntry._id,
                 {
-                    status: 'submitted',
-                    submittedAt: new Date()
+                    $set: { status: 'submitted', submittedAt: new Date() },
+                    $addToSet: { [mediaField]: fileMeta._id }
                 },
                 { session }
+            );
+        } else if (contest.entryFee === 0) {
+            // FREE contest — upsert ContestEntry
+            await ContestEntry.findOneAndUpdate(
+                { userId, contestId },
+                {
+                    $set: { status: 'submitted', submittedAt: new Date() },
+                    $addToSet: { [mediaField]: fileMeta._id }  // ✅ photos OR videos
+                },
+                { upsert: true, session, new: true }
             );
         }
 

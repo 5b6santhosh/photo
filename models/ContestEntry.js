@@ -33,6 +33,8 @@ const ContestEntrySchema = new mongoose.Schema({
         type: Date,
         default: null
     },
+    photos: [{ type: mongoose.Schema.Types.ObjectId, ref: 'FileMeta', default: [] }],
+    videos: [{ type: mongoose.Schema.Types.ObjectId, ref: 'FileMeta', default: [] }],
     breakdown: {
         quality: Number,
         safety: Number,
