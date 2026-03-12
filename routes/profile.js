@@ -5,7 +5,7 @@ const User = require('../models/User');
 const FileMeta = require('../models/FileMeta');
 const Like = require('../models/Like');
 const Favorite = require('../models/Favorite');
-const { isValidObjectId } = mongoose; 
+const { isValidObjectId } = mongoose;
 
 const router = express.Router();
 
@@ -717,7 +717,7 @@ router.put('/me/location', auth, async (req, res) => {
 });
 
 // ── GET /curators/:id/profile ─────────────────────────────────────────────────
-router.get('/curators/:id/profile', async (req, res) => {
+router.get('/curators/:id/profile', optionalAuth, async (req, res) => {
     try {
         const { id: curatorId } = req.params;
         const userId = req.user?.id ?? null;
@@ -727,26 +727,23 @@ router.get('/curators/:id/profile', async (req, res) => {
             return res.status(400).json({ status: 'error', message: 'Invalid curator ID' });
         }
 
-        const User = require('../models/User');
         const Following = require('../models/Following');
 
         const curator = await User.findById(curatorId)
-            .select('_id name avatarUrl wins')
+            .select('_id name firstName avatarUrl wins')
             .lean();
 
         if (!curator) {
             return res.status(404).json({ status: 'error', message: 'Curator not found' });
         }
 
-        // Follower count
         const followerCount = await Following.countDocuments({ following: curatorId });
 
-        // Is the requesting user already following this curator?
         let isFollowing = false;
         if (safeUserId) {
             const follow = await Following.findOne({
-                follower: safeUserId,
-                following: curatorId,
+                follower: new mongoose.Types.ObjectId(safeUserId),
+                following: new mongoose.Types.ObjectId(curatorId),
             }).lean();
             isFollowing = !!follow;
         }
@@ -755,7 +752,7 @@ router.get('/curators/:id/profile', async (req, res) => {
             status: 'success',
             curator: {
                 id: curator._id.toString(),
-                name: curator.name || 'Curator',
+                name: curator.name || curator.firstName || 'Curator',
                 avatarUrl: curator.avatarUrl || '',
                 wins: curator.wins || 0,
                 followerCount,
