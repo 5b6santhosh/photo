@@ -6,12 +6,20 @@ const { Types: { ObjectId } } = mongoose;
 const FileMeta = require('../models/FileMeta');
 const Like = require('../models/Like');
 const Following = require('../models/Following');
+const { authMiddleware } = require('../middleware/auth');
 
 const isValidObjectId = (id) => id && mongoose.Types.ObjectId.isValid(id);
 
-router.get('/feed', async (req, res) => {
+const optionalAuth = (req, res, next) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader) return next(); // no token — continue as guest
+    return authMiddleware(req, res, next); // token present — validate it
+};
+
+router.get('/feed', optionalAuth, async (req, res) => {
     try {
-        const userId = req.user?.id ?? null;
+        console.log('[FEED] req.user:', req.user);
+        const userId = req.user?.id ?? req.user?._id ?? null;
         const safeUserId = isValidObjectId(userId) ? userId : null;
 
         // ── 1. Fetch public files (no populate — we do a safe manual lookup) ──
@@ -39,7 +47,7 @@ router.get('/feed', async (req, res) => {
             : [];
 
         const creatorMap = creators.reduce((acc, u) => {
-            acc[u._id.toString()] = u;
+            acc[String(u._id)] = u;
             return acc;
         }, {});
 
@@ -74,8 +82,8 @@ router.get('/feed', async (req, res) => {
                     .lean();
 
                 followingUserIds = followingDocs
-                    .map(doc => doc.following?.toString())
-                    .filter(Boolean); // remove any nulls
+                    .map(doc => doc.following ? String(doc.following) : null)
+                    .filter(Boolean);
 
                 console.log(`[FEED] userId=${safeUserId} follows ${followingUserIds.length} users:`, followingUserIds);
             } catch (followErr) {
@@ -108,11 +116,11 @@ router.get('/feed', async (req, res) => {
             const fileId = f._id.toString();
             const isVideo = f.mimeType?.startsWith('video/') ?? false;
 
-            const createdByIdStr = f.createdBy?.toString();
+            const createdByIdStr = f.createdBy ? String(f.createdBy) : null;
             const creator = isValidObjectId(createdByIdStr)
                 ? (creatorMap[createdByIdStr] ?? null)
                 : null;
-            const createdById = creator?._id?.toString() ?? null;
+            const createdById = creator?._id ? String(creator._id) : null;
 
             const eventIdStr = f.event?.toString();
             const event = isValidObjectId(eventIdStr)

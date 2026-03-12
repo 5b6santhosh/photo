@@ -35,6 +35,7 @@ function formatHighlightPhoto(photo, contestEndDate, options = {}) {
     const url = toFullUrl(photo.path || photo.url);
     const thumbnailUrl = toFullUrl(photo.thumbnailPath || photo.thumbnailUrl) || url;
 
+    if (!url) return null;  
 
     return {
         id: photo._id?.toString() || photo.id?.toString() || '',
