@@ -738,16 +738,15 @@ router.get('/my', authMiddleware, async (req, res) => {
     }
 });
 
-// routes/contest.js - Add this route
+
 router.get('/:contestId/overview', authMiddleware, async (req, res) => {
     try {
         const { contestId } = req.params;
         const userId = req.user.id;
 
-        // ── 1. Validate ObjectId ──────────────────────────────────────────────────
         validateObjectId(contestId, 'contestId');
 
-        // ── 2. Fetch contest ──────────────────────────────────────────────────────
+        // ── 1. Fetch contest ──────────────────────────────────────────────
         const contest = await Contest.findById(contestId)
             .populate('rules', 'title description prizeDescription theme')
             .lean();
@@ -756,47 +755,121 @@ router.get('/:contestId/overview', authMiddleware, async (req, res) => {
             return res.status(404).json({ success: false, error: 'Contest not found' });
         }
 
-        // ── 3. User's submissions for this contest ────────────────────────────────
+        // ── 2. User's submissions ─────────────────────────────────────────
         const mySubmissions = await Submission.find({
             contestId: new mongoose.Types.ObjectId(contestId),
             userId: new mongoose.Types.ObjectId(userId),
         })
-            .populate('fileId', 'thumbnailUrl path title')
             .sort({ createdAt: -1 })
             .lean();
 
-        // ── 4. Total entry count ──────────────────────────────────────────────────
-        const totalEntries = await Submission.countDocuments({
-            contestId: new mongoose.Types.ObjectId(contestId),
-        });
+        // ── 3. Resolve thumbnails via 3-tier fallback ─────────────────────
+        //   Tier 1: fileId → FileMeta
+        //   Tier 2: metadata.entryId → FileMeta
+        //   Tier 3: FileMeta.find({ event, createdBy, isSubmission })
+        const resolvedSubmissions = await Promise.all(
+            mySubmissions.map(async (sub) => {
+                let thumbnailUrl = sub.thumbnailUrl ?? null;
 
-        // ── 5. Placement ──────────────────────────────────────────────────────────
-        const mySubmissionIds = mySubmissions.map((s) => s._id.toString());
+                // Tier 1 – populate fileId if it's a real FileMeta ObjectId
+                if (!thumbnailUrl && sub.fileId) {
+                    const file = await FileMeta.findById(sub.fileId)
+                        .select('thumbnailUrl path')
+                        .lean();
+                    thumbnailUrl = file?.thumbnailUrl ?? file?.path ?? null;
+                }
 
+                // Tier 2 – try metadata.entryId as a FileMeta _id
+                if (!thumbnailUrl && sub.metadata?.entryId) {
+                    const file = await FileMeta.findById(sub.metadata.entryId)
+                        .select('thumbnailUrl path')
+                        .lean();
+                    thumbnailUrl = file?.thumbnailUrl ?? file?.path ?? null;
+                }
+
+                // Tier 3 – fallback: find any FileMeta for this user + contest
+                if (!thumbnailUrl) {
+                    const file = await FileMeta.findOne({
+                        event: new mongoose.Types.ObjectId(contestId),
+                        createdBy: new mongoose.Types.ObjectId(userId),
+                        isSubmission: true,
+                        archived: false,
+                    })
+                        .select('thumbnailUrl path')
+                        .lean();
+                    thumbnailUrl = file?.thumbnailUrl ?? file?.path ?? null;
+                }
+
+                return {
+                    id: sub._id,
+                    thumbnail: thumbnailUrl,
+                    status: sub.status ?? null,
+                    verdict: sub.verdict ?? null,
+                    aiScore: sub.aiScore ?? null,
+                    submittedAt: sub.submittedAt
+                        ? new Date(sub.submittedAt).toISOString()
+                        : sub.createdAt
+                            ? new Date(sub.createdAt).toISOString()
+                            : null,
+                };
+            })
+        );
+
+        // ── 4. Total entry count ──────────────────────────────────────────
+        const [submissionCount, entryCount] = await Promise.all([
+            Submission.countDocuments({ contestId: new mongoose.Types.ObjectId(contestId) }),
+            ContestEntry.countDocuments({ contestId: new mongoose.Types.ObjectId(contestId) }),
+        ]);
+        const totalEntries = Math.max(submissionCount, entryCount);
+
+        // ── 5. Placement ──────────────────────────────────────────────────
         let placement = 'participant';
         let placementPosition = null;
         let judgeDecision = null;
 
-        if (mySubmissionIds.length > 0) {
+        // JudgeDecision.entryId can be a Submission _id OR a ContestEntry _id
+        // → search both sets
+        const mySubIds = mySubmissions.map(s => s._id);
+
+        // Also grab ContestEntry ids for this user
+        const myEntry = await ContestEntry.findOne({
+            contestId: new mongoose.Types.ObjectId(contestId),
+            userId: new mongoose.Types.ObjectId(userId),
+        }).lean();
+
+        const searchIds = [
+            ...mySubIds,
+            ...(myEntry ? [myEntry._id] : []),
+        ].map(id => new mongoose.Types.ObjectId(id.toString()));
+
+        if (searchIds.length > 0) {
             judgeDecision = await JudgeDecision.findOne({
                 contestId: new mongoose.Types.ObjectId(contestId),
-                entryId: { $in: mySubmissionIds.map(id => new mongoose.Types.ObjectId(id)) },
+                entryId: { $in: searchIds },
                 finalDecision: 'winner',
             }).lean();
 
             if (judgeDecision) {
                 placement = judgeDecision.position === 1 ? 'winner' : 'finalist';
                 placementPosition = judgeDecision.position;
+            } else {
+                // Check if any submission is shortlisted/winner by status field
+                const bestSub = mySubmissions.find(s =>
+                    ['winner', 'shortlisted'].includes(s.status)
+                );
+                if (bestSub) {
+                    placement = bestSub.status === 'winner' ? 'winner' : 'finalist';
+                }
             }
         }
 
-        // ── 6. Phase 3 / results visibility ──────────────────────────────────────
+        // ── 6. Phase / results visibility ─────────────────────────────────
         const now = new Date();
         const phase3Start = new Date(contest.endDate);
         phase3Start.setDate(phase3Start.getDate() + 2);
         const resultsVisible = now >= phase3Start;
 
-        // ── 7. Highlights (only after results are visible) ────────────────────────
+        // ── 7. Highlights (Phase 3 only) ──────────────────────────────────
         let highlights = [];
         if (resultsVisible) {
             const topEntries = await Submission.find({
@@ -805,63 +878,57 @@ router.get('/:contestId/overview', authMiddleware, async (req, res) => {
             })
                 .sort({ aiScore: -1, votes: -1 })
                 .limit(10)
-                .populate('fileId', 'thumbnailUrl')
                 .lean();
 
-            highlights = topEntries.map(e => ({
-                entryId: e._id.toString(),
-                thumbnailUrl: e.fileId?.thumbnailUrl ?? e.thumbnailUrl ?? null,
-                rank: e.prizePosition ?? null,
-                aiScore: e.aiScore ?? null,
-                isMyEntry: e.userId?.toString() === userId.toString(),
-            }));
+            highlights = await Promise.all(
+                topEntries.map(async (e) => {
+                    let thumbUrl = e.thumbnailUrl ?? null;
+                    if (!thumbUrl && e.fileId) {
+                        const file = await FileMeta.findById(e.fileId)
+                            .select('thumbnailUrl path').lean();
+                        thumbUrl = file?.thumbnailUrl ?? file?.path ?? null;
+                    }
+                    return {
+                        entryId: e._id.toString(),
+                        thumbnailUrl: thumbUrl,
+                        rank: e.prizePosition ?? null,
+                        aiScore: e.aiScore ?? null,
+                        isMyEntry: e.userId?.toString() === userId.toString(),
+                    };
+                })
+            );
         }
 
-        // ── 8. Timeline ───────────────────────────────────────────────────────────
-        // Pass sorted ascending (oldest first) so the first element is the earliest
+        // ── 8. Timeline ───────────────────────────────────────────────────
         const mySubmissionsSortedAsc = [...mySubmissions].sort(
             (a, b) => new Date(a.createdAt) - new Date(b.createdAt)
         );
         const timeline = buildUserTimeline(mySubmissionsSortedAsc, judgeDecision);
 
-        // ── 9. Build response ─────────────────────────────────────────────────────
+        // ── 9. Response ───────────────────────────────────────────────────
         res.json({
             success: true,
             contest: {
                 id: contest._id,
                 title: contest.rules?.title ?? contest.title ?? null,
-                subtitle: contest.rules?.description ?? null,
-                prizeText: contest.rules?.prizeDescription ?? 'Win curated badge + spotlight',
+                subtitle: contest.rules?.description ?? contest.subtitle ?? null,
+                prizeText: contest.rules?.prizeDescription ?? contest.prizeText ?? 'Win curated badge + spotlight',
                 status: getContestStatus(contest, now),
                 theme: contest.rules?.theme ?? null,
 
-                // Stats
                 totalEntries,
-                myShots: mySubmissions.length,
+                myShots: resolvedSubmissions.length,
                 placement,
                 placementPosition,
 
-                // Dates (ISO strings for safe parsing in Dart)
                 startDate: contest.startDate?.toISOString() ?? null,
                 endDate: contest.endDate?.toISOString() ?? null,
                 phase3Start: phase3Start.toISOString(),
                 resultsVisible,
                 timeLabel: calculateTimeLabel(contest, now),
 
-                // User's submissions
-                mySubmissions: mySubmissions.map((s) => ({
-                    id: s._id,
-                    thumbnail: s.fileId?.thumbnailUrl ?? null,
-                    status: s.status ?? null,
-                    verdict: s.verdict ?? null,
-                    aiScore: s.aiScore ?? null,
-                    submittedAt: s.createdAt?.toISOString() ?? null,
-                })),
-
-                // Highlights
+                mySubmissions: resolvedSubmissions,   // ← now always has thumbnails
                 highlights,
-
-                // Journey timeline
                 timeline,
             },
         });

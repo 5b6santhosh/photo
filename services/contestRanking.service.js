@@ -37,7 +37,49 @@ async function getTopEntriesForReview({ contestId, limit = 30 }) {
         verdict: { $in: ['approved', 'review'] }
     }).lean();
 
-    if (entries.length === 0) return [];
+    if (entries.length === 0) {
+        console.log('⚠️ MLFeatureLog empty for contest, falling back to Submission records...');
+
+        const Submission = require('../models/Submission');
+        const submissions = await Submission.find({
+            contestId,
+            status: { $in: ['submitted', 'approved', 'shortlisted', 'winner', 'pending'] }
+        }).lean();
+
+        if (submissions.length === 0) {
+            return {
+                qualified: [],
+                disqualified: [],
+                stats: { totalEntries: 0, qualifiedCount: 0, disqualifiedCount: 0 }
+            };
+        }
+
+        // Build synthetic entry objects matching MLFeatureLog shape
+        entries = submissions.map(sub => ({
+            entryId: sub._id,
+            userId: sub.userId,
+            contestId: sub.contestId,
+            verdict: sub.verdict || 'approved',
+            scores: {
+                quality: sub.aiScore ? sub.aiScore * 0.4 : 20,
+                theme: sub.aiScore ? sub.aiScore * 0.3 : 15,
+                safety: sub.aiScore ? sub.aiScore * 0.3 : 15,
+            },
+            aiSignals: {
+                nsfwScore: 0,
+                themeSimilarity: 0.5,
+                perceptualQuality: sub.aiScore || 50,
+            },
+            features: {
+                sharpness: 50,
+                entropy: 5,
+                brightness: 128,
+                skinExposureRatio: 0,
+            },
+            mediaType: sub.mediaType || 'image',
+            _isSyntheticFallback: true,  // flag for transparency
+        }));
+    }
 
     // Get likes
     const entryObjectIds = entries.map(e => new mongoose.Types.ObjectId(e.entryId.toString()));
@@ -263,7 +305,12 @@ async function getAdminPreview({ contestId, adminId }) {
     const Submission = require('../models/Submission');
     const populatedEntries = await Promise.all(
         rankingResult.qualified.map(async (entry) => {
-            const sub = await Submission.findById(entry.entryId)
+            const sub = await Submission.findOne({
+                $or: [
+                    { _id: entry.entryId },
+                    { 'metadata.entryId': entry.entryId }
+                ]
+            })
                 .populate('fileId', 'thumbnailUrl path title')
                 .populate('userId', 'name email avatarUrl')
                 .lean();
