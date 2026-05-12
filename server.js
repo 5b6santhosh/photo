@@ -105,6 +105,7 @@ app.use('/api/payments', require('./routes/payments'));
 app.use('/api/follow', require('./routes/follow'));
 app.use('/api/favorites', require('./routes/favorites'));
 app.use('/api/contest-favorites', require('./routes/contestFavorites'));
+app.use('/api/gimbi', require('./routes/gimbi'));
 
 // ============================================
 // ROUTES - MEDIA EVALUATION (NEW)

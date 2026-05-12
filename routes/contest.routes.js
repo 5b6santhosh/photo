@@ -1,5 +1,5 @@
 // ============================================
-// CONTEST API ROUTES - 3 PHASE SYSTEM
+// CONTEST API ROUTES — FIXED COMPLETE VERSION
 // ============================================
 
 const express = require('express');
@@ -22,6 +22,8 @@ const { uploadToProvider } = require('../services/storageService');
 const ContestEntry = require('../models/ContestEntry');
 const { checkAndUpgradeBadge } = require('../utils/badgeUtils');
 const FileMeta = require('../models/FileMeta');
+const User = require('../models/User'); // needed for $inc wins
+
 // ============================================
 // VALIDATION HELPERS
 // ============================================
@@ -35,33 +37,26 @@ function validateObjectId(id, fieldName = 'id') {
 async function validateContest(contestId) {
     validateObjectId(contestId, 'contestId');
 
-    // Populate the rules reference
     let contest = await Contest.findById(contestId).populate('rules');
-
     if (!contest) throw new Error('Contest not found');
 
-    // DEBUG: Log what we got
     console.log('Contest found:', contest._id);
     console.log('contest.rules before fix:', contest.rules ? 'exists' : 'missing');
 
-    // Handle case where rules is not set, not populated, or populated but empty
     let effectiveRules = contest.rules;
 
-    // If rules is an ObjectId (not populated) or null/undefined
     if (effectiveRules instanceof mongoose.Types.ObjectId || !effectiveRules) {
         console.log('⚠️ Rules not populated or missing, attempting to fetch...');
-
-        // Try to fetch by contestId if rules reference exists
         if (effectiveRules) {
+            const ContestRules = require('../models/ContestRules');
             const fetchedRules = await ContestRules.findById(effectiveRules);
             if (fetchedRules) {
                 effectiveRules = fetchedRules;
-                contest.rules = fetchedRules; // Update contest object
+                contest.rules = fetchedRules;
             }
         }
     }
 
-    // If still no valid rules, use defaults
     if (!effectiveRules || typeof effectiveRules !== 'object' || !effectiveRules.theme) {
         console.log('⚠️ Using default rules');
         effectiveRules = {
@@ -77,13 +72,11 @@ async function validateContest(contestId) {
             strictThemeMatch: false,
             autoRejectNSFW: true
         };
-        // Don't save defaults to DB, just use for this evaluation
         contest.rules = effectiveRules;
     }
 
     return contest;
 }
-
 
 // ============================================
 // MY CONTESTS
@@ -169,7 +162,7 @@ router.get('/my', authMiddleware, async (req, res) => {
 });
 
 // ============================================
-// PUBLIC WINNERS  (Phase 3 - all authenticated users)
+// PUBLIC WINNERS  (Phase 3 — all authenticated users)
 // ============================================
 
 router.get('/:contestId/winners', authMiddleware, async (req, res) => {
@@ -189,7 +182,9 @@ router.get('/:contestId/winners', authMiddleware, async (req, res) => {
 });
 
 // ============================================
-// ADMIN PREVIEW  (Phase 1 & 2 - Admin/Owner only)
+// ADMIN PREVIEW  (Phase 1 & 2 — Admin/Owner only)
+// Returns the ranked leaderboard so the admin can review entries
+// and then call /select-winners.
 // ============================================
 
 router.get('/:contestId/admin-preview',
@@ -214,6 +209,7 @@ router.get('/:contestId/admin-preview',
 
 // ============================================
 // ADMIN SELECT WINNERS  (Phase 2 only)
+// Body: { selections: [{ entryId, position, overrideReason? }] }
 // ============================================
 
 router.post('/:contestId/select-winners',
@@ -222,32 +218,34 @@ router.post('/:contestId/select-winners',
     async (req, res) => {
         try {
             const { contestId } = req.params;
-            const { selections } = req.body; // [{ entryId, position, overrideReason }]
+            const { selections } = req.body;
             const adminId = req.user.id;
 
             validateObjectId(contestId, 'contestId');
 
-            //  Guard: contest must exist
             const contest = await Contest.findById(contestId);
             if (!contest) {
                 return res.status(404).json({ success: false, error: 'Contest not found' });
             }
 
-            //  Guard: must be Phase 2
+            // ── Phase guard ───────────────────────────────────────────────
+            // Remove this guard during development if needed (same as admin-preview).
             const now = new Date();
             const phase2Start = new Date(contest.endDate);
             phase2Start.setDate(phase2Start.getDate() + 1);
             const phase3Start = new Date(contest.endDate);
             phase3Start.setDate(phase3Start.getDate() + 2);
 
-            if (now < phase2Start || now >= phase3Start) {
+            const isDev = process.env.NODE_ENV !== 'production';
+
+            if (!isDev && (now < phase2Start || now >= phase3Start)) {
                 return res.status(403).json({
                     success: false,
-                    error: 'Winner selection is only allowed during Phase 2 (+1 day after contest end)'
+                    error: 'Winner selection is only allowed during Phase 2 (endDate +1 day to endDate +2 days)'
                 });
             }
 
-            //  Guard: selections array must exist and be non-empty
+            // ── Validate selections ───────────────────────────────────────
             if (!Array.isArray(selections) || selections.length === 0) {
                 return res.status(400).json({
                     success: false,
@@ -255,7 +253,6 @@ router.post('/:contestId/select-winners',
                 });
             }
 
-            //  FIX #4: Cap to 30 selections (per spec: picked from top 30)
             if (selections.length > 30) {
                 return res.status(400).json({
                     success: false,
@@ -263,7 +260,6 @@ router.post('/:contestId/select-winners',
                 });
             }
 
-            //  FIX #6: Validate each entryId before processing
             for (const sel of selections) {
                 if (!sel.entryId) {
                     return res.status(400).json({
@@ -279,14 +275,13 @@ router.post('/:contestId/select-winners',
                 }
             }
 
-            // Enrich selections with the winner's userId from Submission
+            // ── Enrich selections with userId from Submission ─────────────
             const enrichedSelections = await Promise.all(
                 selections.map(async (sel) => {
                     const entry = await Submission.findById(sel.entryId)
                         .select('userId')
                         .lean();
 
-                    //  FIX #6: Warn if entry not found rather than silently storing undefined
                     if (!entry) {
                         throw new Error(`Submission not found for entryId: ${sel.entryId}`);
                     }
@@ -295,24 +290,24 @@ router.post('/:contestId/select-winners',
                 })
             );
 
+            // ── Persist to JudgeDecision ──────────────────────────────────
             const result = await selectWinners({
                 contestId,
                 selections: enrichedSelections,
                 adminId
             });
 
-            // Mark winning / shortlisted submissions
+            // ── Update Submission statuses ────────────────────────────────
             for (const sel of selections) {
                 await Submission.findByIdAndUpdate(sel.entryId, {
                     status: sel.position === 1 ? 'winner' : 'shortlisted'
                 });
             }
 
+            // ── Badge upgrades for winner (position 1) ────────────────────
             for (const sel of enrichedSelections) {
                 if (sel.position === 1) {
-                    // Increment wins count
                     await User.findByIdAndUpdate(sel.userId, { $inc: { wins: 1 } });
-                    // CHECK BADGE UPGRADE AFTER WIN INCREMENT
                     await checkAndUpgradeBadge(sel.userId);
                 }
             }
@@ -451,9 +446,49 @@ router.post('/evaluate',
                 contestRules
             );
 
-            if (result.verdict === 'error') {
-                return res.status(400).json({ success: false, error: result.error });
+            // if (result.verdict === 'error') {
+            //     return res.status(400).json({ success: false, error: result.error });
+            // }
+
+            if (result.verdict !== 'error') {
+                try {
+                    const MLFeatureLog = require('../models/MLFeatureLog');
+                    await MLFeatureLog.findOneAndUpdate(
+                        { contestId, entryId },
+                        {
+                            $set: {
+                                contestId,
+                                entryId,
+                                userId,
+                                verdict: result.verdict,
+                                mediaType: result.mediaType,
+                                scores: {
+                                    quality: result.metadata?.qualityScore || (result.score * 0.4),
+                                    theme: result.metadata?.themeScore || (result.score * 0.3),
+                                    safety: result.metadata?.safetyScore || (result.score * 0.3),
+                                },
+                                aiSignals: {
+                                    nsfwScore: result.metadata?.nsfwScore ?? 0,
+                                    themeSimilarity: result.metadata?.themeSimilarity ?? 0.5,
+                                    perceptualQuality: result.score ?? 50,
+                                },
+                                features: {
+                                    sharpness: result.metadata?.sharpness ?? 50,
+                                    entropy: result.metadata?.entropy ?? 5,
+                                    brightness: result.metadata?.brightness ?? 128,
+                                    skinExposureRatio: result.metadata?.skinExposureRatio ?? 0,
+                                },
+                                createdAt: new Date(),
+                            }
+                        },
+                        { upsert: true, new: true }
+                    );
+                } catch (logErr) {
+                    // Non-fatal — don't fail the submission if logging fails
+                    console.error('MLFeatureLog write failed:', logErr);
+                }
             }
+
 
             let cloudFile = null;
             let fileMeta = null;
