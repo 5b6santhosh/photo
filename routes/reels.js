@@ -417,6 +417,7 @@ router.get('/feed/swipe', async (req, res) => {
                                 username: 1,
                                 firstName: 1,
                                 lastName: 1,
+                                name: 1,
                                 avatarUrl: 1,
                                 wins: 1
                             }

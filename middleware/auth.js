@@ -3,6 +3,8 @@
 // ============================================
 const jwt = require('jsonwebtoken');
 const TokenBlacklist = require('../models/TokenBlacklist');
+const User = require('../models/User');
+const { updateStreak } = require('../utils/streakUtils');
 
 const authMiddleware = async (req, res, next) => {
     try {
@@ -21,11 +23,36 @@ const authMiddleware = async (req, res, next) => {
 
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
+        const user = await User.findById(decoded.userId);
+        if (!user) {
+            return res.status(401).json({ message: 'User not found' });
+        }
+
+        // 🔧 NEW: Update streak if not already updated today
+        const now = new Date();
+        const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        const lastLogin = user.login_date ? new Date(user.login_date) : null;
+        const lastLoginDate = lastLogin
+            ? new Date(lastLogin.getFullYear(), lastLogin.getMonth(), lastLogin.getDate())
+            : null;
+
+        // Only update streak if user hasn't logged in today yet
+        if (!lastLoginDate || lastLoginDate.getTime() !== today.getTime()) {
+            // Run streak update in background (don't block response)
+            updateStreak(user).catch(err => {
+                console.error('Streak update error:', err);
+                // Non-fatal: don't crash auth if streak fails
+            });
+        }
+
         req.user = {
             id: decoded.userId,
             email: decoded.email,
             role: decoded.role,
-            badgeTier: decoded.badgeTier
+            badgeTier: decoded.badgeTier,
+            streakDays: user.streakDays,
+            firstName: user.firstName,
+            avatarUrl: user.avatarUrl
         };
 
         req.token = token;
@@ -57,13 +84,33 @@ const optionalAuth = async (req, res, next) => {
 
         try {
             const decoded = jwt.verify(token, process.env.JWT_SECRET);
-            req.user = {
-                id: decoded.userId,
-                email: decoded.email,
-                role: decoded.role,
-                badgeTier: decoded.badgeTier
-            };
-            req.token = token;
+            const user = await User.findById(decoded.userId);
+            if (user) {
+                const now = new Date();
+                const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+                const lastLogin = user.login_date ? new Date(user.login_date) : null;
+                const lastLoginDate = lastLogin
+                    ? new Date(lastLogin.getFullYear(), lastLogin.getMonth(), lastLogin.getDate())
+                    : null;
+
+                if (!lastLoginDate || lastLoginDate.getTime() !== today.getTime()) {
+                    updateStreak(user).catch(err => {
+                        console.error('Optional auth streak error:', err);
+                    });
+                }
+                req.user = {
+                    id: decoded.userId,
+                    email: decoded.email,
+                    role: decoded.role,
+                    badgeTier: decoded.badgeTier,
+                    streakDays: user.streakDays,
+                    firstName: user.firstName,
+                    avatarUrl: user.avatarUrl
+                };
+                req.token = token;
+            } else {
+                req.user = null;
+            }
         } catch (err) {
             req.user = null; // Invalid token, but continue
         }

@@ -228,20 +228,54 @@ router.post('/:contestId/select-winners',
                 return res.status(404).json({ success: false, error: 'Contest not found' });
             }
 
+            // // ── Phase guard ───────────────────────────────────────────────
+            // // Remove this guard during development if needed (same as admin-preview).
+            // const now = new Date();
+            // const phase2Start = new Date(contest.endDate);
+            // phase2Start.setDate(phase2Start.getDate() + 1);
+            // const phase3Start = new Date(contest.endDate);
+            // phase3Start.setDate(phase3Start.getDate() + 2);
+
+            // const isDev = process.env.NODE_ENV !== 'production';
+
+            // if (!isDev && (now < phase2Start || now >= phase3Start)) {
+            //     return res.status(403).json({
+            //         success: false,
+            //         error: 'Winner selection is only allowed during Phase 2 (endDate +1 day to endDate +2 days)'
+            //     });
+            // }
+
             // ── Phase guard ───────────────────────────────────────────────
-            // Remove this guard during development if needed (same as admin-preview).
+            // 🔧 UPDATED: Winner selection allowed for 3 days after contest ends
             const now = new Date();
-            const phase2Start = new Date(contest.endDate);
-            phase2Start.setDate(phase2Start.getDate() + 1);
-            const phase3Start = new Date(contest.endDate);
-            phase3Start.setDate(phase3Start.getDate() + 2);
+            const contestEnd = new Date(contest.endDate);
+
+            // Normalize to midnight for consistent date comparison
+            contestEnd.setHours(0, 0, 0, 0);
+            now.setHours(0, 0, 0, 0);
+
+            const phase2Start = new Date(contestEnd);  // Starts immediately after contest ends
+            const phase3Start = new Date(contestEnd);
+            phase3Start.setDate(phase3Start.getDate() + 3);  // 3-day window
 
             const isDev = process.env.NODE_ENV !== 'production';
 
-            if (!isDev && (now < phase2Start || now >= phase3Start)) {
+            // 🔧 FIXED: Allow selection from contest end until endDate + 3 days
+            if (!isDev && (now <= contestEnd || now >= phase3Start)) {
+                const daysUntilWindow = Math.ceil((contestEnd - now) / (1000 * 60 * 60 * 24));
+                const daysAfterWindow = Math.ceil((now - phase3Start) / (1000 * 60 * 60 * 24));
+
                 return res.status(403).json({
                     success: false,
-                    error: 'Winner selection is only allowed during Phase 2 (endDate +1 day to endDate +2 days)'
+                    error: now <= contestEnd
+                        ? `Contest is still active. Winner selection opens on ${contestEnd.toISOString().split('T')[0]}`
+                        : `Winner selection window closed ${daysAfterWindow} days ago. Results are now public.`,
+                    phaseInfo: {
+                        contestEnded: contestEnd.toISOString(),
+                        selectionWindowStart: phase2Start.toISOString(),
+                        selectionWindowEnd: phase3Start.toISOString(),
+                        currentDate: now.toISOString()
+                    }
                 });
             }
 
@@ -276,14 +310,61 @@ router.post('/:contestId/select-winners',
             }
 
             // ── Enrich selections with userId from Submission ─────────────
+            // const enrichedSelections = await Promise.all(
+            //     selections.map(async (sel) => {
+            //         const entry = await Submission.findById(sel.entryId)
+            //             .select('userId')
+            //             .lean();
+
+            //         if (!entry) {
+            //             throw new Error(`Submission not found for entryId: ${sel.entryId}`);
+            //         }
+
+            //         return { ...sel, userId: entry.userId };
+            //     })
+            // );
+
+            // ── Enrich selections with userId from Submission ─────────────
             const enrichedSelections = await Promise.all(
                 selections.map(async (sel) => {
-                    const entry = await Submission.findById(sel.entryId)
-                        .select('userId')
+                    // 🔧 FIX: Try multiple strategies to find the submission
+
+                    // Strategy 1: Try direct findById (in case entryId is actually Submission._id)
+                    let entry = await Submission.findById(sel.entryId)
+                        .select('userId contestId')
                         .lean();
 
+                    // Strategy 2: If not found, search by contestId + userId from MLFeatureLog
                     if (!entry) {
-                        throw new Error(`Submission not found for entryId: ${sel.entryId}`);
+                        const MLFeatureLog = require('../models/MLFeatureLog');
+                        const featureLog = await MLFeatureLog.findOne({
+                            contestId: new mongoose.Types.ObjectId(contestId),
+                            entryId: new mongoose.Types.ObjectId(sel.entryId)
+                        }).lean();
+
+                        if (featureLog && featureLog.userId) {
+                            // Find the submission for this user in this contest
+                            entry = await Submission.findOne({
+                                userId: featureLog.userId,
+                                contestId: new mongoose.Types.ObjectId(contestId)
+                            }).select('userId contestId').lean();
+                        }
+                    }
+
+                    // Strategy 3: Fallback - search all submissions in this contest
+                    if (!entry) {
+                        entry = await Submission.findOne({
+                            contestId: new mongoose.Types.ObjectId(contestId),
+                            // Try to match by metadata.entryId if it exists
+                            'metadata.entryId': sel.entryId
+                        }).select('userId contestId').lean();
+                    }
+
+                    if (!entry) {
+                        throw new Error(
+                            `Submission not found for entryId: ${sel.entryId}. ` +
+                            `Tried: 1) Direct lookup, 2) MLFeatureLog userId+contestId, 3) metadata.entryId`
+                        );
                     }
 
                     return { ...sel, userId: entry.userId };
@@ -306,7 +387,7 @@ router.post('/:contestId/select-winners',
 
             // ── Badge upgrades for winner (position 1) ────────────────────
             for (const sel of enrichedSelections) {
-                if (sel.position === 1) {
+                if (sel.position === 1 && sel.userId) {
                     await User.findByIdAndUpdate(sel.userId, { $inc: { wins: 1 } });
                     await checkAndUpgradeBadge(sel.userId);
                 }
@@ -315,7 +396,9 @@ router.post('/:contestId/select-winners',
             res.json({
                 success: true,
                 message: 'Winners selected successfully',
-                ...result
+                contestId: contestId,                         
+                processedCount: result.processedCount,         
+                winners: result.winners
             });
 
         } catch (error) {
@@ -589,7 +672,7 @@ router.post('/evaluate',
                         $set: {
                             contestId,
                             userId,
-                            fileId: fileMeta?._id || entryId,
+                            fileId: fileMeta?._id,
                             caption: caption || '',
                             mediaUrl: cloudFile?.url || null,
                             thumbnailUrl: cloudFile?.thumbnailUrl || null,
@@ -598,7 +681,10 @@ router.post('/evaluate',
                             status: finalStatus,
                             verdict: result.verdict,
                             aiScore: result.score,
-                            metadata: result.metadata,
+                            metadata: {
+                                ...result.metadata,
+                                entryId: entryId.toString()
+                            },
                             updatedAt: new Date()
                         }
                     },

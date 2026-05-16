@@ -8,6 +8,7 @@ const mailService = require("../services/mail.service");
 const { authMiddleware, requireAdmin } = require('../middleware/auth');
 const TokenBlacklist = require('../models/TokenBlacklist');
 const { checkAndUpgradeBadge } = require('../utils/badgeUtils');
+const PasswordReset = require('../models/PasswordReset');
 
 const router = express.Router();
 
@@ -504,5 +505,182 @@ router.patch('/promote/:id', authMiddleware,
       res.status(500).json({ success: false, message: err.message });
     }
   });
+
+
+router.post('/forgot-password', async (req, res) => {
+  const { email } = req.body;
+
+  try {
+    if (!email) {
+      return res.status(400).json({
+        success: false,
+        message: "Email is required"
+      });
+    }
+
+    const user = await User.findOne({ email });
+
+    // Security: Always return success message to prevent email enumeration
+    if (!user) {
+      return res.status(200).json({
+        success: true,
+        message: "If an account exists with this email, you will receive a reset code"
+      });
+    }
+
+    // Check resend cooldown (60 seconds)
+    const existingReset = await PasswordReset.findOne({
+      email,
+      lastOtpSentAt: { $gt: new Date(Date.now() - 60 * 1000) }
+    });
+
+    if (existingReset) {
+      const secondsLeft = Math.ceil(60 - (Date.now() - existingReset.lastOtpSentAt.getTime()) / 1000);
+      return res.status(429).json({
+        success: false,
+        message: `Please wait ${secondsLeft} seconds before requesting a new code`
+      });
+    }
+
+    // Delete any existing reset request for this email
+    await PasswordReset.deleteOne({ email });
+
+    // Generate 6-digit OTP
+    const plainOTP = Math.floor(100000 + Math.random() * 900000).toString();
+    const hashedOTP = await bcrypt.hash(plainOTP, 10);
+    const otpExpiresAt = new Date(Date.now() + 5 * 60 * 1000); // 5 minutes expiry
+
+    // Store reset request
+    await PasswordReset.create({
+      email,
+      otp: hashedOTP,
+      otpExpiresAt,
+      otpAttempts: 0,
+      lastOtpSentAt: new Date()
+    });
+
+    // Send email (uncomment when mail service is configured)
+    await mailService.sendMail({
+      to: email,
+      subject: "Reset Your Photo Curator Password 🔐",
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+          <h2 style="color: #333;">Password Reset Request</h2>
+          <p>Your verification code is:</p>
+          <h1 style="font-size: 32px; letter-spacing: 8px; color: #8E2DE2; text-align: center;">${plainOTP}</h1>
+          <p style="color: #666;">This code expires in 5 minutes.</p>
+          <p style="color: #999; font-size: 12px;">If you didn't request this, please ignore this email.</p>
+        </div>
+      `
+    });
+
+    console.log(`Reset OTP sent to ${email}`);
+
+    res.status(200).json({
+      success: true,
+      message: "If an account exists with this email, you will receive a reset code"
+    });
+
+  } catch (err) {
+    console.error("Forgot Password Error:", err);
+    res.status(500).json({
+      success: false,
+      message: "Failed to send reset code. Please try again."
+    });
+  }
+});
+
+// POST /api/auth/reset-password - Verify OTP and update password
+router.post('/reset-password', async (req, res) => {
+  const { email, otp, newPassword } = req.body;
+
+  try {
+    if (!email || !otp || !newPassword) {
+      return res.status(400).json({
+        success: false,
+        message: "Email, OTP, and new password are required"
+      });
+    }
+
+    if (newPassword.length < 6) {
+      return res.status(400).json({
+        success: false,
+        message: "Password must be at least 6 characters"
+      });
+    }
+
+    const resetRequest = await PasswordReset.findOne({ email });
+
+    if (!resetRequest) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid or expired reset request"
+      });
+    }
+
+    // Check max attempts (5)
+    if (resetRequest.otpAttempts >= 5) {
+      await PasswordReset.deleteOne({ _id: resetRequest._id });
+      return res.status(403).json({
+        success: false,
+        message: "Too many failed attempts. Please request a new reset code."
+      });
+    }
+
+    // Check expiry
+    if (resetRequest.otpExpiresAt < new Date()) {
+      await PasswordReset.deleteOne({ _id: resetRequest._id });
+      return res.status(400).json({
+        success: false,
+        message: "Reset code has expired"
+      });
+    }
+
+    // Verify OTP
+    const isValid = await bcrypt.compare(otp, resetRequest.otp);
+    if (!isValid) {
+      resetRequest.otpAttempts += 1;
+      await resetRequest.save();
+
+      return res.status(400).json({
+        success: false,
+        message: "Invalid reset code"
+      });
+    }
+
+    // Find user and update password
+    const user = await User.findOne({ email });
+    if (!user) {
+      await PasswordReset.deleteOne({ _id: resetRequest._id });
+      return res.status(400).json({
+        success: false,
+        message: "User not found"
+      });
+    }
+
+    // Hash and update password
+    const hashedPassword = await bcrypt.hash(newPassword, 12);
+    user.password = hashedPassword;
+    await user.save();
+
+    // Clean up reset request
+    await PasswordReset.deleteOne({ _id: resetRequest._id });
+
+    // Optional: Blacklist existing tokens for this user
+    // (Requires storing userId in PasswordReset or decoding all tokens)
+
+    res.status(200).json({
+      success: true,
+      message: "Password reset successfully. Please login with your new password."
+    });
+
+  } catch (err) {
+    console.error("Reset Password Error:", err);
+    res.status(500).json({
+      success: false,
+      message: "Failed to reset password. Please try again."
+    });
+  }
+});
 
 module.exports = router;

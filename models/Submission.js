@@ -125,16 +125,22 @@ const submissionSchema = new mongoose.Schema({
   // Metadata
   metadata: {
     fileSize: Number,
-    duration: Number, // For videos
-    dimensions: {
-      width: Number,
-      height: Number
-    },
-    deviceInfo: String
+    duration: Number,
+    dimensions: { width: Number, height: Number },
+    deviceInfo: String,
+    qualityScore: Number,
+    themeScore: Number,
+    safetyScore: Number,
+    nsfwScore: Number,
+    themeSimilarity: Number,
+    sharpness: Number,
+    entropy: Number,
+    brightness: Number,
+    skinExposureRatio: Number
   }
 
 }, {
-  timestamps: true // FIXED: Use Mongoose timestamps instead of manual
+  timestamps: true 
 });
 
 // ============================================================================
@@ -253,8 +259,8 @@ submissionSchema.statics.getByContest = async function (contestId, options = {})
   const skip = (page - 1) * limit;
 
   return this.find(query)
-    .populate('userId', 'username email avatar')
-    .populate('fileId')
+    .populate('userId', 'username email avatarUrl firstName name')
+    .populate('fileId', 'thumbnailUrl path title')
     .sort({ [sortBy]: sortOrder })
     .skip(skip)
     .limit(limit);
@@ -268,8 +274,8 @@ submissionSchema.statics.getLeaderboard = async function (contestId, limit = 10)
     contestId,
     status: { $in: ['approved', 'shortlisted', 'winner'] }
   })
-    .populate('userId', 'username email avatar')
-    .populate('fileId')
+  .populate('userId', 'username email avatarUrl firstName name')
+  .populate('fileId', 'thumbnailUrl path')
     .sort({ votes: -1, createdAt: 1 })
     .limit(limit);
 };
@@ -277,89 +283,89 @@ submissionSchema.statics.getLeaderboard = async function (contestId, limit = 10)
 /**
  * Get pending review submissions
  */
-submissionSchema.statics.getPendingReview = async function (contestId = null) {
-  const query = { status: 'pending' };
-  if (contestId) query.contestId = contestId;
+// submissionSchema.statics.getPendingReview = async function (contestId = null) {
+//   const query = { status: 'pending' };
+//   if (contestId) query.contestId = contestId;
 
-  return this.find(query)
-    .populate('userId', 'username email')
-    .populate('contestId', 'title')
-    .populate('fileId')
-    .sort({ createdAt: 1 }); // FIFO review
-};
+//   return this.find(query)
+//     .populate('userId', 'username email avatarUrl firstName name')
+//     .populate('contestId', 'title')
+//     .populate('fileId', 'thumbnailUrl path')
+//     .sort({ createdAt: 1 }); // FIFO review
+// };
 
 /**
  * Get user's submission for contest
  */
 submissionSchema.statics.getUserSubmission = async function (userId, contestId) {
   return this.findOne({ userId, contestId })
-    .populate('fileId')
+    .populate('fileId', 'thumbnailUrl path title')
     .populate('contestId', 'title description entryFee');
 };
 
 /**
  * Get statistics for a contest
  */
-submissionSchema.statics.getContestStats = async function (contestId) {
-  const stats = await this.aggregate([
-    { $match: { contestId: mongoose.Types.ObjectId(contestId) } },
-    {
-      $group: {
-        _id: '$status',
-        count: { $sum: 1 }
-      }
-    }
-  ]);
+// submissionSchema.statics.getContestStats = async function (contestId) {
+//   const stats = await this.aggregate([
+//     { $match: { contestId: mongoose.Types.ObjectId(contestId) } },
+//     {
+//       $group: {
+//         _id: '$status',
+//         count: { $sum: 1 }
+//       }
+//     }
+//   ]);
 
-  const totalVotes = await this.aggregate([
-    { $match: { contestId: mongoose.Types.ObjectId(contestId) } },
-    { $group: { _id: null, total: { $sum: '$votes' } } }
-  ]);
+//   const totalVotes = await this.aggregate([
+//     { $match: { contestId: mongoose.Types.ObjectId(contestId) } },
+//     { $group: { _id: null, total: { $sum: '$votes' } } }
+//   ]);
 
-  return {
-    byStatus: stats.reduce((acc, item) => {
-      acc[item._id] = item.count;
-      return acc;
-    }, {}),
-    totalVotes: totalVotes[0]?.total || 0
-  };
-};
+//   return {
+//     byStatus: stats.reduce((acc, item) => {
+//       acc[item._id] = item.count;
+//       return acc;
+//     }, {}),
+//     totalVotes: totalVotes[0]?.total || 0
+//   };
+// };
 
-// ============================================================================
-// MIDDLEWARE
-// ============================================================================
+// // ============================================================================
+// // MIDDLEWARE
+// // ============================================================================
 
-/**
- * Pre-save validation
- */
-submissionSchema.pre('save', function (next) {
-  // Auto-set approval/rejection dates
-  if (this.isModified('status')) {
-    if (this.status === 'approved' && !this.approvedAt) {
-      this.approvedAt = new Date();
-    }
-    if (this.status === 'rejected' && !this.rejectedAt) {
-      this.rejectedAt = new Date();
-    }
-  }
+// /**
+//  * Pre-save validation
+//  */
+// submissionSchema.pre('save', function (next) {
+//   // Auto-set approval/rejection dates
+//   if (this.isModified('status')) {
+//     if (this.status === 'approved' && !this.approvedAt) {
+//       this.approvedAt = new Date();
+//     }
+//     if (this.status === 'rejected' && !this.rejectedAt) {
+//       this.rejectedAt = new Date();
+//     }
+//   }
 
-  next();
-});
+//   next();
+// });
 
-/**
- * Pre-delete cleanup
- */
-submissionSchema.pre('deleteOne', { document: true, query: false }, async function (next) {
-  try {
-    // Delete associated file
-    const FileMeta = mongoose.model('FileMeta');
-    await FileMeta.findByIdAndDelete(this.fileId);
+// /**
+//  * Pre-delete cleanup
+//  */
+// submissionSchema.pre('deleteOne', { document: true, query: false }, async function (next) {
+//   try {
+//     // Delete associated file
+//     const FileMeta = mongoose.model('FileMeta');
+//     await FileMeta.findByIdAndDelete(this.fileId);
 
-    next();
-  } catch (error) {
-    next(error);
-  }
-});
+//     next();
+//   } catch (error) {
+//     next(error);
+//   }
+// });
 
 // ============================================================================
 // EXPORT

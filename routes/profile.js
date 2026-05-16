@@ -5,8 +5,8 @@ const User = require('../models/User');
 const FileMeta = require('../models/FileMeta');
 const Like = require('../models/Like');
 const Favorite = require('../models/Favorite');
+const { getUserBadgeInfo } = require('../utils/badgeUtils');
 const { isValidObjectId } = mongoose;
-
 const router = express.Router();
 
 /**
@@ -50,6 +50,7 @@ router.get('/me', auth, async (req, res) => {
                 totalPhotos,
                 wins: user.wins || 0,
                 streakDays: user.streakDays || 0,
+                badge: await getUserBadgeInfo(userId),
                 location: user.location || {
                     city: '',
                     state: '',
@@ -124,11 +125,11 @@ router.get('/:userId', optionalAuth, async (req, res) => {
                 avatarUrl: user.avatarUrl || '',
                 dateOfBirth: user.dateOfBirth ? new Date(user.dateOfBirth).getFullYear() : null,
                 gender: user.gender || null,
-
                 totalPhotos,
                 wins: user.wins || 0,
                 streakDays: user.streakDays || 0,
                 isOwnProfile: viewerId === userId,
+                badge: await getUserBadgeInfo(userId),
                 location: user.location || {
                     city: '',
                     state: '',

@@ -15,21 +15,48 @@ const JudgeDecision = require('../models/JudgeDecision');
 // Phase 3 : endDate +2 days → results are public
 // ============================================
 
+// ============================================
+// PHASE DETECTION - UPDATED FOR 3-DAY WINDOW
+// Phase 1 : contest is active (startDate to endDate inclusive)
+// Phase 2 : endDate < now <= endDate + 3 days → admin selects winners
+// Phase 3 : now > endDate + 3 days → results are public
+// ============================================
+
 function getPhaseInfo(contest) {
     const now = new Date();
     const contestEnd = new Date(contest.endDate);
 
-    const phase2Start = new Date(contestEnd);
-    phase2Start.setDate(phase2Start.getDate() + 1);   // endDate + 1 day
+    // Reset time to midnight for consistent date comparison
+    contestEnd.setHours(0, 0, 0, 0);
+    now.setHours(0, 0, 0, 0);
 
+    // 🔧 FIXED: Phase 2 starts IMMEDIATELY after contest ends (endDate + 0 days)
+    const phase2Start = new Date(contestEnd);
+    phase2Start.setDate(phase2Start.getDate() + 0);  // Same day as endDate
+
+    // 🔧 FIXED: Phase 2 lasts for 3 FULL days after contest ends
     const phase3Start = new Date(contestEnd);
-    phase3Start.setDate(phase3Start.getDate() + 2);   // endDate + 2 days
+    phase3Start.setDate(phase3Start.getDate() + 3);  // endDate + 3 days
 
     let phase = 1;
-    if (now >= phase3Start) phase = 3;
-    else if (now >= phase2Start) phase = 2;
+    if (now > contestEnd) {
+        if (now < phase3Start) {
+            phase = 2;  // Winner selection window (3 days)
+        } else {
+            phase = 3;  // Results public
+        }
+    }
+    // else phase = 1 (contest still active)
 
-    return { phase, contestEnd, phase2Start, phase3Start };
+    return {
+        phase,
+        contestEnd,
+        phase2Start,
+        phase3Start,
+        daysRemainingForSelection: phase === 2
+            ? Math.ceil((phase3Start - now) / (1000 * 60 * 60 * 24))
+            : 0
+    };
 }
 
 // ============================================
@@ -258,7 +285,7 @@ async function getAdminPreview({ contestId, adminId }) {
     const contest = await Contest.findById(contestId);
     if (!contest) throw new Error('Contest not found');
 
-    const { phase, phase3Start } = getPhaseInfo(contest);
+    const { phase, phase3Start, daysRemainingForSelection } = getPhaseInfo(contest);
 
     // ── PHASE 3 GUARD ─────────────────────────────────────────────────────
     // In production: once phase 3 starts, winners are public — use /winners.
@@ -271,6 +298,7 @@ async function getAdminPreview({ contestId, adminId }) {
             phase: 3,
             canSelect: false,
             message: 'Results are now public. Use /winners endpoint.',
+            selectionWindowClosed: true,
             topEntries: [],
             leaderboard: []
         };
@@ -294,26 +322,60 @@ async function getAdminPreview({ contestId, adminId }) {
     // Now we simply findById(_submissionId) which is the Submission's own _id.
     const populatedEntries = await Promise.all(
         rankingResult.qualified.map(async (entry) => {
-
+            let sub = null;
             const submissionId = entry._submissionId || entry.entryId;
 
-            const sub = await Submission.findById(submissionId)
-                .populate('fileId', 'thumbnailUrl path title')
-                .populate('userId', 'name email avatarUrl')
-                .lean();
+            // 🔧 FIX #1: Try finding Submission by _submissionId first
+            if (submissionId && mongoose.Types.ObjectId.isValid(submissionId)) {
+                sub = await Submission.findById(submissionId)
+                    .populate('fileId', 'thumbnailUrl path title')
+                    .populate('userId', 'name firstName email avatarUrl')
+                    .lean();
+            }
 
-            // Shape the response to match your Flutter Leaderboard model
+            // 🔧 FIX #2: Fallback - find by userId + contestId (for MLFeatureLog entries)
+            if (!sub && entry.userId && entry.contestId) {
+                sub = await Submission.findOne({
+                    userId: entry.userId,
+                    contestId: entry.contestId
+                })
+                    .populate('fileId', 'thumbnailUrl path title')
+                    .populate('userId', 'name firstName email avatarUrl')
+                    .lean();
+            }
+
+            // 🔧 FIX #3: Extract URLs from multiple possible locations
+            const thumbnailUrl =
+                sub?.fileId?.thumbnailUrl ??
+                sub?.thumbnailUrl ??
+                sub?.metadata?.thumbnailUrl ??
+                null;
+
+            const mediaUrl =
+                sub?.fileId?.path ??
+                sub?.mediaUrl ??
+                sub?.metadata?.mediaUrl ??
+                null;
+
+            // 🔧 FIX #4: Better user name fallback chain
+            const userData = sub?.userId;
+            const userName = userData?.name ??
+                userData?.firstName ??
+                userData?.email?.split('@')[0] ??
+                'Unknown';
+
             return {
                 rank: entry.preliminaryRank,
                 entryId: {
                     id: entry.entryId.toString(),
-                    thumbnailUrl: sub?.fileId?.thumbnailUrl ?? sub?.thumbnailUrl ?? null,
-                    mediaUrl: sub?.fileId?.path ?? sub?.mediaUrl ?? null,
+                    thumbnailUrl: thumbnailUrl,
+                    mediaUrl: mediaUrl,
                 },
-                user: sub?.userId
+                user: userData
                     ? {
-                        name: sub.userId.name ?? sub.userId.email ?? 'Unknown',
-                        avatarUrl: sub.userId.avatarUrl ?? null,
+                        name: userName,
+                        avatarUrl: userData.avatarUrl ?? null,
+                        email: userData.email ?? null, // Optional: include if needed by frontend
                     }
                     : null,
                 scores: {
@@ -332,10 +394,16 @@ async function getAdminPreview({ contestId, adminId }) {
     return {
         phase,
         canSelect: phase === 2,
+        daysRemainingForSelection: phase === 2 ? daysRemainingForSelection : 0,
         revealAt: phase3Start.toISOString(),
-        stats: rankingResult.stats,
-        topEntries: populatedEntries,  // kept for backward-compat
-        leaderboard: populatedEntries,  // Flutter reads `leaderboard`
+        stats: {
+            totalSubmissions: rankingResult.stats.totalEntries,
+            approvedCount: rankingResult.stats.qualifiedCount,
+            rejectedCount: rankingResult.stats.disqualifiedCount,
+            shortlistedByJudge: existingDecisions.filter(d => d.finalDecision === 'winner').length,
+        },
+        topEntries: populatedEntries,
+        leaderboard: populatedEntries,
         isFinalized: contest.settlement?.finalized ?? false,
         disqualified: rankingResult.disqualified
     };
@@ -414,25 +482,85 @@ async function getPublicWinners({ contestId, limit = 10 }) {
 // SELECT WINNERS  (Phase 2 — admin action)
 // ============================================
 
+// async function selectWinners({ contestId, selections, adminId }) {
+//     // Clear any previous selections for this contest
+//     await JudgeDecision.deleteMany({ contestId });
+
+//     const decisions = selections.map((sel, idx) => ({
+//         contestId,
+//         entryId: sel.entryId,
+//         userId: sel.userId,
+//         judgeId: adminId,
+//         aiScore: sel.scores?.final ?? sel.aiScore ?? null,
+//         aiRank: sel.preliminaryRank ?? null,
+//         finalDecision: 'winner',
+//         position: sel.position || idx + 1,
+//         overrideReason: sel.overrideReason ?? null,
+//         selectedAt: new Date()
+//     }));
+
+//     await JudgeDecision.insertMany(decisions);
+//     return { success: true, count: decisions.length };
+// }
+
+// ============================================
+// SELECT WINNERS  (Phase 2 — admin action)
+// ============================================
+
 async function selectWinners({ contestId, selections, adminId }) {
     // Clear any previous selections for this contest
     await JudgeDecision.deleteMany({ contestId });
 
-    const decisions = selections.map((sel, idx) => ({
-        contestId,
-        entryId: sel.entryId,
-        userId: sel.userId,
-        judgeId: adminId,
-        aiScore: sel.scores?.final ?? sel.aiScore ?? null,
-        aiRank: sel.preliminaryRank ?? null,
-        finalDecision: 'winner',
-        position: sel.position || idx + 1,
-        overrideReason: sel.overrideReason ?? null,
-        selectedAt: new Date()
-    }));
+    const Submission = require('../models/Submission');
+
+    // Build decisions array AND fetch submission data for response
+    const decisions = [];
+    const winnersResponse = [];
+
+    for (const sel of selections) {
+        // 🔧 Find submission to get userId if not provided
+        let userId = sel.userId;
+        if (!userId) {
+            const submission = await Submission.findById(sel.entryId)
+                .select('userId')
+                .lean();
+            if (submission) {
+                userId = submission.userId?.toString();
+            }
+        }
+
+        const decision = {
+            contestId,
+            entryId: sel.entryId,
+            userId: userId,
+            judgeId: adminId,
+            aiScore: sel.scores?.final ?? sel.aiScore ?? null,
+            aiRank: sel.preliminaryRank ?? null,
+            finalDecision: 'winner',
+            position: sel.position || (decisions.length + 1),
+            overrideReason: sel.overrideReason ?? null,
+            selectedAt: new Date()
+        };
+        decisions.push(decision);
+
+        // 🔧 Build response object matching Flutter model
+        winnersResponse.push({
+            entryId: sel.entryId,
+            userId: userId,
+            position: decision.position,
+            status: decision.position === 1 ? 'winner' : 'shortlisted'
+        });
+    }
 
     await JudgeDecision.insertMany(decisions);
-    return { success: true, count: decisions.length };
+
+    // 🔧 Return response matching AdminSelectWinnerResponse model
+    return {
+        success: true,
+        contestId,
+        processedCount: decisions.length,
+        winners: winnersResponse
+    };
 }
 
 module.exports = {

@@ -6,6 +6,8 @@ const User = require('../models/User');
 const FileMeta = require('../models/FileMeta');
 const Contest = require('../models/Contest');
 const Submission = require('../models/Submission');
+const { getUserBadgeInfo } = require('../utils/badgeUtils');
+const JudgeDecision = require('../models/JudgeDecision');
 
 const isValidObjectId = (id) => {
     return mongoose.Types.ObjectId.isValid(id);
@@ -195,12 +197,22 @@ router.get('/', async (req, res) => {
             events[0] || null;
 
         // 7. Top curators
-        const topCurators = await User.find({ wins: { $gte: 3 } })
+        const topCuratorsRaw = await User.find({ wins: { $gte: 3 } })
             .sort({ wins: -1 })
             .limit(12)
             .select('name avatarUrl wins')
             .lean();
 
+        // Resolve all async badge requests in parallel safely
+        const topCurators = await Promise.all(
+            topCuratorsRaw.map(async (c) => ({
+                id: c._id.toString(),
+                name: c.name,
+                avatarUrl: c.avatarUrl,
+                wins: c.wins,
+                badge: await getUserBadgeInfo(c._id.toString())
+            }))
+        );
         // 8. Trending photos
         const trendingPhotosRaw = await FileMeta.find({
             archived: false,
@@ -224,20 +236,62 @@ router.get('/', async (req, res) => {
             isCurated: p.isCurated || false,
             isLiked: false,
         }));
+        const userBadge = userId ? await getUserBadgeInfo(userId) : null;
+
+        let winnersResponse = { winners: [] };
+
+        try {
+            const latestContestWithWinners = await Contest.findOne({
+                contestStatus: 'completed'
+            })
+                .sort({ endDate: -1 })
+                .select('_id title')
+                .lean();
+
+            if (latestContestWithWinners) {
+                const judgeDecisions = await JudgeDecision.find({
+                    contestId: latestContestWithWinners._id,
+                    finalDecision: 'winner'
+                })
+                    .populate('entryId', 'title')
+                    .populate('userId', 'name avatarUrl')
+                    .sort({ position: 1 })
+                    .limit(3)
+                    .lean();
+
+                winnersResponse = {
+                    contestId: latestContestWithWinners._id.toString(),
+                    contestTitle: latestContestWithWinners.title,
+                    winners: judgeDecisions.map((decision, index) => ({
+                        rank: decision.position || (index + 1),
+                        entryId: {
+                            id: decision.entryId?._id?.toString() || null,
+                            title: decision.entryId?.title || 'Untitled',
+                        },
+                        userId: {
+                            id: decision.userId?._id?.toString() || null,
+                            name: decision.userId?.name || 'Anonymous',
+                            avatarUrl: decision.userId?.avatarUrl || null,
+                        },
+                        aiScore: decision.aiScore || null,
+                        aiRank: decision.aiRank || null,
+                    }))
+                };
+            }
+        } catch (winnersErr) {
+            console.error('Failed to fetch winners for home banner:', winnersErr);
+        }
 
         res.json({
             success: true,
             data: {
                 userWins,
+                userBadge: userBadge,
                 heroEvent,
-                topCurators: topCurators.map(c => ({
-                    id: c._id.toString(),
-                    name: c.name,
-                    avatarUrl: c.avatarUrl,
-                    wins: c.wins,
-                })),
+                topCurators,
                 events,
                 trendingPhotos,
+                winnersResponse: winnersResponse,
             }
         });
 
