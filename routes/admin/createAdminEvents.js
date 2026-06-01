@@ -1,9 +1,10 @@
+// routes/admin/createAdminEvents.js  (matches your app.js registration)
 const express = require('express');
 const router = express.Router();
 const Contest = require('../../models/Contest');
 const ContestRules = require('../../models/ContestRules');
-// const auth = require('../../middleware/auth');
-// const adminOrMaster = require('../../middleware/adminOrMaster');
+const { upload, handleUploadError } = require('../../middleware/upload');
+const { uploadToProvider } = require('../../services/storageService');
 
 /**
  * POST /api/admin/events
@@ -11,8 +12,15 @@ const ContestRules = require('../../models/ContestRules');
  */
 router.post(
     '/',
-    // auth,
-    // adminOrMaster,
+    (req, res, next) => {
+        const contentType = req.headers['content-type'] || '';
+        if (contentType.includes('multipart/form-data')) {
+            upload.single('bannerImage')(req, res, next);
+        } else {
+            next();
+        }
+    },
+    handleUploadError,
     async (req, res) => {
         try {
             const {
@@ -23,28 +31,50 @@ router.post(
                 startDate,
                 endDate,
                 allowedMediaTypes,
-                bannerImage,
                 maxSubmissionsPerUser,
                 theme,
                 keywords,
                 entryFee
-
             } = req.body;
 
             if (!title || !startDate || !endDate) {
-                return res.status(400).json({ message: 'Missing required fields' });
+                return res.status(400).json({ message: 'Missing required fields: title, startDate, endDate' });
             }
+
+            // Resolve bannerImage: file upload takes priority, then JSON URL string
+            let bannerImageUrl = null;
+
+            if (req.file) {
+                try {
+                    const cloudFile = await uploadToProvider(req.file);
+                    bannerImageUrl = cloudFile.url;
+                } catch (uploadErr) {
+                    console.error('Banner upload error:', uploadErr);
+                    return res.status(500).json({ message: 'Banner image upload failed' });
+                }
+            } else if (req.body.bannerImage && typeof req.body.bannerImage === 'string' && req.body.bannerImage.trim()) {
+                bannerImageUrl = req.body.bannerImage.trim();
+            }
+
             const creatorId = '600000000000000000000000';
 
+            // Step 1: Create contest — pre('save') fires once (isNew = true).
+            // With the fixed Contest.js, this is the ONLY time pre('save') touches
+            // contestStatus. bannerImage is saved correctly here.
             const contest = await Contest.create({
                 title,
-                subtitle,
-                description,
+                subtitle: subtitle || '',
+                description: description || '',
                 prizeText: prizeText || undefined,
                 startDate: new Date(startDate),
                 endDate: new Date(endDate),
-                allowedMediaTypes: allowedMediaTypes || ['image'],
-                bannerImage,
+                allowedMediaTypes: allowedMediaTypes
+                    ? (Array.isArray(allowedMediaTypes)
+                        ? allowedMediaTypes
+                        : JSON.parse(allowedMediaTypes))
+                    : ['image'],
+                //  allowedMediaTypes: allowedMediaTypes || ['image'],
+                bannerImage: bannerImageUrl || null,
                 maxSubmissionsPerUser: maxSubmissionsPerUser || 1,
                 entryFee: entryFee || 0,
                 createdBy: creatorId,
@@ -69,20 +99,21 @@ router.post(
                 autoReviewScore: 50
             });
 
-            contest.rules = rules._id;
-            await contest.save();
-
+            await Contest.findByIdAndUpdate(
+                contest._id,
+                { $set: { rules: rules._id } }
+            );
 
             res.status(201).json({
                 message: 'Event created successfully',
                 eventId: contest._id,
-                rulesId: rules._id
-
+                rulesId: rules._id,
+                bannerImage: bannerImageUrl || null,
             });
 
         } catch (err) {
-            console.error(err);
-            res.status(500).json({ message: 'Event creation failed' });
+            console.error('Event creation error:', err);
+            res.status(500).json({ message: 'Event creation failed', detail: err.message });
         }
     }
 );

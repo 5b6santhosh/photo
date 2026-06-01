@@ -1,6 +1,6 @@
 // routes/home.js
 const express = require('express');
-const mongoose = require('mongoose'); // Imported for ObjectId validation
+const mongoose = require('mongoose');
 const router = express.Router();
 const User = require('../models/User');
 const FileMeta = require('../models/FileMeta');
@@ -43,7 +43,6 @@ function formatHighlightPhoto(photo, contestEndDate, options = {}) {
     };
 }
 
-
 function formatTimeLabel(startDate, endDate) {
     const now = new Date();
     if (now < startDate) {
@@ -78,17 +77,19 @@ function mapContest(contest, userId, photoMap, submissionStats, userMap = {}) {
         .map(id => {
             const photo = photoMap[id.toString()];
             if (!photo) return null;
-
-            // Get username from userMap if available (for curated photos)
             const photoUserName = userMap[photo.createdBy?.toString()] || null;
-
             return formatHighlightPhoto(photo, endDate, {
-                isCurated: true, // Highlight photos are curated
+                isCurated: true,
                 userName: photoUserName,
-                isLiked: false // You can implement like checking here if needed
+                isLiked: false
             });
         })
         .filter(p => p !== null);
+
+    const rawBanner = typeof contest.bannerImage === 'string' ? contest.bannerImage.trim() : null;
+    const coverImage = highlightPhotos.length > 0
+        ? highlightPhotos[0].url
+        : (rawBanner || null);
 
     return {
         id: contest._id.toString(),
@@ -105,7 +106,9 @@ function mapContest(contest, userId, photoMap, submissionStats, userMap = {}) {
         totalSubmissions: stats.total,
         mySubmissions: stats.myCount,
         highlightPhotos,
-        coverImage: highlightPhotos.length > 0 ? highlightPhotos[0].url : null,
+        coverImage,
+        bannerImage: rawBanner || null,
+        entryFee: contest.entryFee || 0,
     };
 }
 
@@ -122,10 +125,11 @@ router.get('/', async (req, res) => {
             userWins = user?.wins || 0;
         }
 
-        // 2. All contests
         const contests = await Contest.find()
+            .select('_id title subtitle prizeText startDate endDate bannerImage highlightPhotos entryFee contestStatus')
             .sort({ startDate: -1 })
             .lean();
+
         const contestIds = contests.map(c => c._id);
 
         // 3. Submissions aggregation
@@ -164,12 +168,13 @@ router.get('/', async (req, res) => {
                 const photos = await FileMeta.find({
                     _id: { $in: validHighlightIds }
                 })
-                    .select('_id path thumbnailPath title subtitle description location uploadedAt peopleCount category likesCount aspectRatio blurHash')
+                    .select('_id path thumbnailPath title subtitle description location uploadedAt peopleCount category likesCount aspectRatio blurHash createdBy')
                     .lean();
 
                 photos.forEach(p => {
                     photoMap[p._id.toString()] = p;
                 });
+
                 const creatorIds = [...new Set(photos
                     .map(p => p.createdBy?.toString())
                     .filter(id => id && isValidObjectId(id))
@@ -184,7 +189,6 @@ router.get('/', async (req, res) => {
                         userMap[c._id.toString()] = c.name;
                     });
                 }
-
             }
         }
 
@@ -203,7 +207,6 @@ router.get('/', async (req, res) => {
             .select('name avatarUrl wins')
             .lean();
 
-        // Resolve all async badge requests in parallel safely
         const topCurators = await Promise.all(
             topCuratorsRaw.map(async (c) => ({
                 id: c._id.toString(),
@@ -213,6 +216,7 @@ router.get('/', async (req, res) => {
                 badge: await getUserBadgeInfo(c._id.toString())
             }))
         );
+
         // 8. Trending photos
         const trendingPhotosRaw = await FileMeta.find({
             archived: false,
@@ -236,6 +240,7 @@ router.get('/', async (req, res) => {
             isCurated: p.isCurated || false,
             isLiked: false,
         }));
+
         const userBadge = userId ? await getUserBadgeInfo(userId) : null;
 
         let winnersResponse = { winners: [] };
@@ -286,12 +291,12 @@ router.get('/', async (req, res) => {
             success: true,
             data: {
                 userWins,
-                userBadge: userBadge,
+                userBadge,
                 heroEvent,
                 topCurators,
                 events,
                 trendingPhotos,
-                winnersResponse: winnersResponse,
+                winnersResponse,
             }
         });
 

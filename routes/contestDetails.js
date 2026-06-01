@@ -338,6 +338,16 @@ router.get('/:contestId/details', authMiddleware, async (req, res) => {
         //         };
         //     }
         // }
+
+        const rawBanner = typeof contest.bannerImage === 'string'
+            ? contest.bannerImage.trim()
+            : null;
+
+        // Cover image priority: highlight photo > banner image > user submission > null
+        const coverImage = highlightPhotos.length > 0
+            ? highlightPhotos[0].url
+            : (rawBanner || (userSubmissions.length > 0 ? userSubmissions[0].url : null));
+
         // 4. STATS - Count from BOTH models to be safe
         const entryCount = await ContestEntry.countDocuments({
             contestId: new mongoose.Types.ObjectId(contestId),
@@ -414,7 +424,8 @@ router.get('/:contestId/details', authMiddleware, async (req, res) => {
             mySubmissions,
             hasParticipated: !!contestEntry || mySubmissions > 0,
             highlightCount: highlightPhotos.length,
-            userSubmissionCount: userSubmissions.length
+            userSubmissionCount: userSubmissions.length,
+            hasBanner: !!rawBanner,
         });
 
         res.json({
@@ -443,8 +454,8 @@ router.get('/:contestId/details', authMiddleware, async (req, res) => {
                 userBadge: userId ? await getUserBadgeInfo(userId) : null,
                 winners: winners,
                 winnersAnnounced: winners.length > 0,
-                coverImage: highlightPhotos.length > 0 ? highlightPhotos[0].url :
-                    (userSubmissions.length > 0 ? userSubmissions[0].url : null),
+                bannerImage: rawBanner || null,
+                coverImage: coverImage,
                 contestEntry,
                 paymentStatus,
                 hasParticipated: !!contestEntry || mySubmissions > 0,

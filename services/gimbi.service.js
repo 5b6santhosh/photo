@@ -2,7 +2,17 @@
 
 // ─────────────────────────────────────────────
 //  gimbi.service.js  (CommonJS — your project style)
-//  v3.1.0 — streak, validation, full replies
+//  v3.2.0 — Gemini + Groq (free tiers), streak, validation, full replies
+//
+//  Free tier limits (as of 2025):
+//  • Google Gemini (gemini-1.5-flash): 1,500 req/day, 1M tokens/day (free)
+//  • Groq (llama-3.1-8b-instant):     14,400 req/day, 500K tokens/day (free)
+//
+//  Priority: Groq → Gemini → rule-based fallback
+//
+//  Env vars needed:
+//    GROQ_API_KEY      — https://console.groq.com/keys
+//    GEMINI_API_KEY_CHAT    — https://aistudio.google.com/app/apikey
 // ─────────────────────────────────────────────
 
 const EXPR = {
@@ -24,9 +34,10 @@ function getUser(id) {
       shots: [],
       totalShots: 0,
       streak: 0,
-      lastShotDate: null,   // NEW — required for streak
+      lastShotDate: null,
       history: [],
       joinedAt: Date.now(),
+      lastChatDate: null,
     });
   }
   return store.get(id);
@@ -45,9 +56,9 @@ function updateStreak(user) {
   const yesterday = new Date(Date.now() - 86_400_000).toDateString();
   const last = user.lastShotDate;
 
-  if (last === today) return user;                // already shot today
-  if (last === yesterday) user.streak += 1;           // consecutive day
-  else user.streak = 1;            // gap — reset
+  if (last === today) return user;             // already shot today
+  if (last === yesterday) user.streak += 1;    // consecutive day
+  else user.streak = 1;                        // gap — reset
 
   user.lastShotDate = today;
   return user;
@@ -60,53 +71,224 @@ function weakest(scores) {
 
 // ── Analysis reply ───────────────────────────
 function analysisReply(avg, weak) {
-  if (avg >= 80) return { expression: EXPR.excited, message: "Wow, this shot is incredible! You're really growing! 🌟", tip: "Try a brand new perspective next time!" };
-  if (avg >= 65) return { expression: EXPR.proud, message: "Great capture! A small tweak and this will be stunning.", tip: `Keep working on your ${weak} — it'll shine.` };
-  if (avg >= 45) return { expression: EXPR.curious, message: "Good effort! Let's dig into what we can improve together.", tip: `Your ${weak} is the biggest opportunity right now.` };
-  return { expression: EXPR.analyzing, message: "Every master started exactly here — let's build the foundation.", tip: `Start with ${weak}: fixing it will unlock everything.` };
+  if (avg >= 80) {
+    return {
+      expression: EXPR.excited,
+      message: "Wow, this shot is incredible — seriously impressive work! 🌟\nYour composition, lighting, and focus are all clicking together.\nYou're not just taking photos; you're creating art.\nKeep experimenting — your next shot could be even better!",
+      tip: "Try a brand new perspective: shoot from ground level or overhead!"
+    };
+  }
+  if (avg >= 65) {
+    return {
+      expression: EXPR.proud,
+      message: "Great capture! You're clearly developing your eye for photography. 👏\nA small tweak in your weakest area will make this stunning.\nReview what worked here — then apply it to your next shot.\nConsistency is your superpower right now!",
+      tip: `Focus on ${weak} this week — master it, and your whole portfolio lifts.`
+    };
+  }
+  if (avg >= 45) {
+    return {
+      expression: EXPR.curious,
+      message: "Good effort — and I see real potential here! Let's level up together. 🔍\nYour ${weak} is the biggest opportunity for quick improvement.\nTry this: review 3 photos you love — what do they do differently?\nSmall, focused practice beats random shooting every time.",
+      tip: `Spend 10 minutes today studying ${weak} — watch one tutorial or analyze a pro shot.`
+    };
+  }
+  return {
+    expression: EXPR.analyzing,
+    message: "Every master started exactly where you are — this is your foundation! 🌱\nLet's build up your ${weak} first; fixing it unlocks everything else.\nDon't compare your chapter 1 to someone else's chapter 20.\nOne intentional shot today > 100 careless ones. You've got this!",
+    tip: `Start here: ${weak === 'lighting' ? 'Shoot near a window for soft, even light.' : weak === 'composition' ? 'Enable your camera grid and practice rule of thirds.' : weak === 'focus' ? 'Half-press to lock focus before shooting.' : 'Pick one color theme and stick to it for today.'}`
+  };
 }
 
-// ── Rule-based chat reply ────────────────────
+// ── Rule-based chat reply (final fallback) ───
 function ruleReply(message, userLevel) {
   const m = message.toLowerCase();
-  if (/\b(hi|hello|hey)\b/.test(m)) return { expression: EXPR.excited, message: "Hey there! Ready to capture something amazing? 📸", tip: "Start with a subject you love — passion always shows!" };
-  if (/composition/.test(m)) return { expression: EXPR.curious, message: "Great topic! Composition is the foundation of every strong image.", tip: "Try the rule of thirds — place subjects at grid intersections." };
-  if (/light/.test(m)) return { expression: EXPR.analyzing, message: "Lighting is absolutely everything in photography.", tip: "Golden hour light is warm, soft and incredibly forgiving." };
-  if (/focus|sharp|blur/.test(m)) return { expression: EXPR.analyzing, message: "Sharp focus makes your subject demand attention!", tip: "Half-press shutter to lock focus before the full press." };
-  if (/portrait/.test(m)) return { expression: EXPR.excited, message: "Portraits capture personality — that's the real magic!", tip: "f/1.8–2.8 gives beautiful background separation (bokeh)." };
-  if (/landscape/.test(m)) return { expression: EXPR.curious, message: "Landscapes reward patience and early mornings!", tip: "f/8–f/11 keeps foreground and background both sharp." };
-  if (/colou?r/.test(m)) return { expression: EXPR.proud, message: "Colour tells a powerful emotional story in every frame.", tip: "Complementary colours create striking visual tension." };
-  if (/improve|better|grow|tips/.test(m)) return { expression: EXPR.curious, message: "Love the growth mindset — here's where to begin:", tip: userLevel === 'pro' ? "Study the masters and analyse their framing choices." : "Shoot at least one intentional frame every single day." };
-  if (/challenge/.test(m)) return { expression: EXPR.excited, message: "Challenges are where growth happens — I love the energy!", tip: "Pick one technique and commit to it for a full week." };
-  return { expression: EXPR.idle, message: "Interesting! Tell me more and I'll help you nail it perfectly.", tip: "Every photo tells a story — what story is yours?" };
+
+  if (/\b(hi|hello|hey)\b/.test(m)) {
+    return {
+      expression: EXPR.excited,
+      message: "Hey there, photographer! 👋\nReady to capture something amazing today?\nI'm Gimbi, your tiny photo companion.\nLet's make every shot count! 📸✨",
+      tip: "Start with a subject you love — passion always shows in your photos!"
+    };
+  }
+
+  if (/composition|rule of thirds|framing/.test(m)) {
+    return {
+      expression: EXPR.curious,
+      message: "Composition is the backbone of powerful photography! 🎨\nTry placing your subject off-center using the rule of thirds.\nEnable your camera's grid overlay to help align shots.\nSmall tweaks = huge visual impact!",
+      tip: "Place key elements at grid intersections for balanced, dynamic frames."
+    };
+  }
+
+  if (/light|golden hour|sunlight/.test(m)) {
+    return {
+      expression: EXPR.analyzing,
+      message: "Lighting is EVERYTHING in photography — you've asked a great question! 💡\nGolden hour (sunrise/sunset) gives warm, soft, flattering light.\nAvoid harsh midday sun — it creates unflattering shadows.\nWhen in doubt: face your subject toward the light source!",
+      tip: "Shoot during golden hour for dreamy, professional-looking results."
+    };
+  }
+
+  if (/focus|sharp|blur|bokeh/.test(m)) {
+    return {
+      expression: EXPR.analyzing,
+      message: "Sharp focus makes your subject pop and demand attention! 🔍\nHalf-press your shutter to lock focus before the full press.\nFor blurry backgrounds (bokeh), use a wide aperture like f/1.8–f/2.8.\nSteady hands or a tripod help avoid camera shake!",
+      tip: "Tap your subject on-screen (phones) or use single-point AF (cameras) for precision."
+    };
+  }
+
+  if (/portrait|people|face/.test(m)) {
+    return {
+      expression: EXPR.excited,
+      message: "Portraits capture personality — that's where the magic happens! 😊\nGet to eye level with your subject for a natural, engaging look.\nUse a wide aperture (f/1.8–f/2.8) to blur distracting backgrounds.\nMost importantly: make your subject feel comfortable!",
+      tip: "Focus on the eyes — they're the window to emotion in portraits."
+    };
+  }
+
+  if (/landscape|nature|scenery/.test(m)) {
+    return {
+      expression: EXPR.curious,
+      message: "Landscapes reward patience, planning, and early mornings! 🏔️\nUse a narrow aperture (f/8–f/11) to keep foreground AND background sharp.\nInclude a foreground element (rock, flower) to add depth and scale.\nCheck the weather — dramatic clouds can transform an ordinary scene!",
+      tip: "Arrive 30 mins before sunrise/sunset to catch the best light and avoid crowds."
+    };
+  }
+
+  if (/colou?r|saturation|vibrant/.test(m)) {
+    return {
+      expression: EXPR.proud,
+      message: "Color tells an emotional story in every single frame! 🌈\nComplementary colors (blue/orange, purple/yellow) create striking tension.\nShoot in RAW to preserve color data for flexible editing later.\nDon't overdo saturation — subtlety often feels more professional!",
+      tip: "Use the HSL panel in editing to tweak individual colors without affecting the whole image."
+    };
+  }
+
+  if (/improve|better|grow|tips|help/.test(m)) {
+    return {
+      expression: EXPR.curious,
+      message: "Love that growth mindset — here's your quick-start guide! 🌱\n🎯 Shoot ONE intentional photo every day (quality > quantity).\n📚 Study one photo you admire — what makes it work?\n🔄 Review your shots weekly: what improved? what needs work?\n✨ Progress compounds — tiny steps lead to big leaps!",
+      tip: userLevel === 'pro'
+        ? "Challenge yourself: recreate a master's shot to learn their technique."
+        : "Keep a photo journal — note what you tried and what you learned each day."
+    };
+  }
+
+  if (/challenge|contest|exercise/.test(m)) {
+    return {
+      expression: EXPR.excited,
+      message: "Challenges are where growth happens — I love your energy! 🔥\nPick ONE technique (e.g., leading lines) and practice it all week.\nDon't judge the results — focus on the learning process.\nShare your favorite shot with a friend for fresh perspective!\nRemember: every pro was once a beginner who didn't quit.",
+      tip: "Set a mini-challenge: 'Today I only shoot in black & white' to see composition differently."
+    };
+  }
+
+  // Default fallback — still multi-line & helpful
+  return {
+    expression: EXPR.idle,
+    message: "Interesting question — tell me more and I'll help you nail it! 🤔\nWhat specifically are you trying to capture or improve?\nIs it about lighting, composition, gear, or editing?\nThe more details you share, the better I can help!",
+    tip: "Every photo tells a story — what story do YOU want yours to tell?"
+  };
 }
 
-// ── OpenAI reply (optional) ──────────────────
-async function openaiReply(message, userLevel) {
-  const { default: OpenAI } = await import('openai');
-  const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-
-  const system = `
-You are Gimbi — a tiny, cute, flat-vector robot pet that is a photography companion.
+// ── Shared system prompt ─────────────────────
+function systemPrompt(userLevel) {
+  return `You are Gimbi — a tiny, cute, flat-vector robot pet that is a photography companion.
 User level: ${userLevel}.
 Respond ONLY in valid JSON with NO markdown fences:
 {
   "expression": one of [idle, excited, analyzing, curious, proud, concerned],
-  "message": string (max 110 chars),
-  "tip": string or null (max 90 chars)
-}`;
+  "message": string (200-400 chars, use \\n for line breaks to create 4+ visual lines),
+  "tip": string or null (max 120 chars, actionable & specific)
+}
+Make message warm, encouraging, and educational. Break into 4 short lines using \\n.`;
+}
 
-  try {
-    const r = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',
-      messages: [{ role: 'system', content: system }, { role: 'user', content: message }],
+// ── Parse JSON response from any LLM ─────────
+function parseJsonReply(raw) {
+  const clean = raw.replace(/```json|```/g, '').trim();
+  return JSON.parse(clean);
+}
+
+// ── Groq reply (llama-3.1-8b-instant — free) ─
+async function groqReply(message, userLevel) {
+  const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${process.env.GROQ_API_KEY}`,
+    },
+    body: JSON.stringify({
+      model: 'llama-3.1-8b-instant',
+      messages: [
+        { role: 'system', content: systemPrompt(userLevel) },
+        { role: 'user', content: message },
+      ],
       max_tokens: 160,
-    });
-    const raw = r.choices[0].message.content.replace(/```json|```/g, '').trim();
-    return JSON.parse(raw);
-  } catch {
-    return ruleReply(message, userLevel);
+      temperature: 0.7,
+    }),
+  });
+
+  if (!response.ok) {
+    const err = await response.text();
+    throw new Error(`Groq error ${response.status}: ${err}`);
   }
+
+  const data = await response.json();
+  return parseJsonReply(data.choices[0].message.content);
+}
+
+// ── Gemini reply (gemini-1.5-flash — free) ───
+async function geminiReply(message, userLevel) {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${process.env.GEMINI_API_KEY_CHAT}`;
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      system_instruction: {
+        parts: [{ text: systemPrompt(userLevel) }],
+      },
+      contents: [
+        { role: 'user', parts: [{ text: message }] },
+      ],
+      generationConfig: {
+        maxOutputTokens: 160,
+        temperature: 0.7,
+      },
+    }),
+  });
+
+  if (!response.ok) {
+    const err = await response.text();
+    throw new Error(`Gemini error ${response.status}: ${err}`);
+  }
+
+  const data = await response.json();
+  const raw = data.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (!raw) throw new Error('Gemini: empty response');
+  return parseJsonReply(raw);
+}
+
+// ── AI reply with fallback chain ─────────────
+//  Priority: Groq → Gemini → rule-based
+async function aiReply(message, userLevel) {
+  if (process.env.GROQ_API_KEY) {
+    try {
+      return await groqReply(message, userLevel);
+    } catch (err) {
+      console.warn('[Gimbi] Groq failed, trying Gemini:', err.message);
+    }
+  }
+
+  if (process.env.GEMINI_API_KEY_CHAT) {
+    try {
+      return await geminiReply(message, userLevel);
+    } catch (err) {
+      console.warn('[Gimbi] Gemini failed, using rule-based fallback:', err.message);
+    }
+  }
+
+  return ruleReply(message, userLevel);
+}
+
+// ── Check if any AI provider is configured ───
+function hasAiProvider() {
+  return !!(process.env.GROQ_API_KEY || process.env.GEMINI_API_KEY_CHAT);
 }
 
 // ─────────────────────────────────────────────
@@ -116,7 +298,7 @@ Respond ONLY in valid JSON with NO markdown fences:
 exports.getStatus = () => ({
   online: true,
   name: 'Gimbi',
-  version: '3.1.0-headset',
+  version: '3.2.0',
   expression: EXPR.idle,
   message: "Hey! I'm Gimbi — let's create something amazing! 📷",
 });
@@ -126,13 +308,24 @@ exports.chat = async ({ userId, message, userLevel = 'new_user' }) => {
 
   if (userId) {
     const u = getUser(userId);
+    const today = new Date().toDateString();
+
+    if (u.lastChatDate === today) {
+      return {
+        expression: EXPR.curious,
+        message: "Thanks for chatting! 🌟\nGimbi is currently in beta testing.\nTo ensure quality, we're limiting chats to 1 per day.\nWe'll unlock more soon — thanks for your patience! 🤖✨",
+        tip: "While you wait, try the /analyze or /challenge features — they're unlimited!"
+      };
+    }
+
+    u.lastChatDate = today;
     u.history.push({ role: 'user', text: message.slice(0, 1000), ts: Date.now() });
     if (u.history.length > 50) u.history = u.history.slice(-50);
     store.set(userId, u);
   }
 
-  const reply = process.env.OPENAI_API_KEY
-    ? await openaiReply(message, userLevel)
+  const reply = hasAiProvider()
+    ? await aiReply(message, userLevel)
     : ruleReply(message, userLevel);
 
   if (userId) {
@@ -145,7 +338,6 @@ exports.chat = async ({ userId, message, userLevel = 'new_user' }) => {
 };
 
 exports.analyze = ({ userId, composition, lighting, focus, colors }) => {
-  // Validate + clamp all scores
   const c = clampScore(composition);
   const l = clampScore(lighting);
   const f = clampScore(focus);
@@ -159,7 +351,7 @@ exports.analyze = ({ userId, composition, lighting, focus, colors }) => {
   let streak = 0;
   if (userId) {
     let u = getUser(userId);
-    u = updateStreak(u);                          // ← streak logic added
+    u = updateStreak(u);
     u.shots.push({ ts: Date.now(), avg, composition: c, lighting: l, focus: f, colors: k });
     u.totalShots++;
     store.set(userId, u);
