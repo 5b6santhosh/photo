@@ -17,8 +17,6 @@ const optionalAuth = (req, res, next) => {
     return authMiddleware(req, res, next);
 };
 
-// ── Reuse the same formatter from your swipe route ───────────────────────────
-// (If you have formatReel in a shared util, import it instead)
 const formatReel = (file, safeUserId, likedSet, bookmarkedSet, followingSet, now) => {
     const isVideo = file.mimeType?.startsWith('video/') ?? false;
     const createdById = file.userInfo?._id ? String(file.userInfo._id) : null;
@@ -49,7 +47,7 @@ const formatReel = (file, safeUserId, likedSet, bookmarkedSet, followingSet, now
         isMyEvent: !!(safeUserId && file.eventInfo?.createdBy?.toString() === safeUserId.toString()),
         isFromFollowing: !!(createdById && followingSet?.has(createdById)),
         isSubmission: file.isSubmission || false,
-        likes: file.likesCount || likeCounts?.[String(file._id)] || 0, // fallback
+        likes: file.likesCount || 0,
         comments: file.commentsCount || 0,
         shares: file.sharesCount || 0,
         isLiked: likedSet?.has(String(file._id)) || false,
@@ -113,7 +111,7 @@ router.get('/feed', optionalAuth, async (req, res) => {
             matchQuery.event = { $in: events.map(e => e._id) };
         }
 
-        // ── Scored + ranked aggregation (same pattern as swipe) ─────────────
+        // ── Scored + ranked aggregation ───────────────────────────────────────
         const files = await FileMeta.aggregate([
             { $match: matchQuery },
             {
@@ -144,7 +142,7 @@ router.get('/feed', optionalAuth, async (req, res) => {
             { $skip: page * limit },
             { $limit: limit },
 
-            // ── JOIN user (full profile, same as swipe) ───────────────────────
+            // ── JOIN user ───────────────────────────────────────────────────
             {
                 $lookup: {
                     from: 'users',
@@ -158,7 +156,7 @@ router.get('/feed', optionalAuth, async (req, res) => {
                                 username: 1,
                                 firstName: 1,
                                 lastName: 1,
-                                name: 1,           // ← keep both for compatibility
+                                name: 1,
                                 email: 1,
                                 avatarUrl: 1,
                                 bio: 1,
@@ -176,7 +174,7 @@ router.get('/feed', optionalAuth, async (req, res) => {
             },
             { $unwind: { path: '$userInfo', preserveNullAndEmptyArrays: true } },
 
-            // ── JOIN contest/event ──────────────────────────────────────────
+            // ── JOIN contest/event ────────────────────────────────────────
             {
                 $lookup: {
                     from: 'contests',
@@ -199,7 +197,7 @@ router.get('/feed', optionalAuth, async (req, res) => {
             { $unwind: { path: '$eventInfo', preserveNullAndEmptyArrays: true } },
         ]);
 
-        // ── Liked + Bookmarked sets (same pattern as swipe) ─────────────────
+        // ── Liked + Bookmarked sets ─────────────────────────────────────────
         let likedSet = new Set();
         let bookmarkedSet = new Set();
         if (safeUserId && files.length) {
@@ -231,7 +229,7 @@ router.get('/feed', optionalAuth, async (req, res) => {
         return res.status(200).json({
             status: 'success',
             count: feed.length,
-            reels: feed,        
+            reels: feed,
             nextPage: page + 1,
             hasMore: files.length === limit,
         });
