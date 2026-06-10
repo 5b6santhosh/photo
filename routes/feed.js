@@ -5,6 +5,7 @@ const { Types: { ObjectId } } = mongoose;
 
 const FileMeta = require('../models/FileMeta');
 const Like = require('../models/Like');
+const Favorite = require('../models/Favorite');
 const Following = require('../models/Following');
 const { authMiddleware } = require('../middleware/auth');
 
@@ -12,8 +13,65 @@ const isValidObjectId = (id) => id && mongoose.Types.ObjectId.isValid(id);
 
 const optionalAuth = (req, res, next) => {
     const authHeader = req.headers.authorization;
-    if (!authHeader) return next(); // no token — continue as guest
-    return authMiddleware(req, res, next); // token present — validate it
+    if (!authHeader) return next();
+    return authMiddleware(req, res, next);
+};
+
+// ── Reuse the same formatter from your swipe route ───────────────────────────
+// (If you have formatReel in a shared util, import it instead)
+const formatReel = (file, safeUserId, likedSet, bookmarkedSet, followingSet, now) => {
+    const isVideo = file.mimeType?.startsWith('video/') ?? false;
+    const createdById = file.userInfo?._id ? String(file.userInfo._id) : null;
+
+    let eventStatus = 'general';
+    if (file.eventInfo) {
+        const start = file.eventInfo.startDate ? new Date(file.eventInfo.startDate) : null;
+        const end = file.eventInfo.endDate ? new Date(file.eventInfo.endDate) : null;
+        if (start && end && !isNaN(start) && !isNaN(end)) {
+            if (now < start) eventStatus = 'upcoming';
+            else if (now > end) eventStatus = 'completed';
+            else eventStatus = 'active';
+        }
+    }
+
+    return {
+        id: String(file._id),
+        mediaType: isVideo ? 'reel' : 'image',
+        photo: {
+            id: String(file._id),
+            title: file.title || 'Untitled',
+            imageUrl: isVideo ? (file.thumbnailUrl || null) : (file.path || null),
+            category: file.category || 'other',
+        },
+        videoUrl: isVideo ? (file.path || null) : null,
+        eventTitle: file.eventInfo?.title || 'General',
+        eventStatus,
+        isMyEvent: !!(safeUserId && file.eventInfo?.createdBy?.toString() === safeUserId.toString()),
+        isFromFollowing: !!(createdById && followingSet?.has(createdById)),
+        isSubmission: file.isSubmission || false,
+        likes: file.likesCount || likeCounts?.[String(file._id)] || 0, // fallback
+        comments: file.commentsCount || 0,
+        shares: file.sharesCount || 0,
+        isLiked: likedSet?.has(String(file._id)) || false,
+        isBookmarked: bookmarkedSet?.has(String(file._id)) || false,
+        user: {
+            id: createdById,
+            username: file.userInfo?.username || file.userInfo?.name || 'Anonymous',
+            firstName: file.userInfo?.firstName || '',
+            lastName: file.userInfo?.lastName || '',
+            name: file.userInfo?.name || `${file.userInfo?.firstName || ''} ${file.userInfo?.lastName || ''}`.trim() || 'Anonymous',
+            avatarUrl: file.userInfo?.avatarUrl || '',
+            bio: file.userInfo?.bio || '',
+            wins: file.userInfo?.wins || 0,
+            streakDays: file.userInfo?.streakDays || 0,
+            location: file.userInfo?.location || '',
+            badgeTier: file.userInfo?.badgeTier || null,
+            isProfileCompleted: file.userInfo?.isProfileCompleted || false,
+        },
+        uploadedAt: file.uploadedAt,
+        freshnessBoost: file.freshnessBoost,
+        engagementScore: file.engagementScore,
+    };
 };
 
 router.get('/feed', optionalAuth, async (req, res) => {
@@ -22,178 +80,161 @@ router.get('/feed', optionalAuth, async (req, res) => {
         const userId = req.user?.id ?? req.user?._id ?? null;
         const safeUserId = isValidObjectId(userId) ? userId : null;
 
-        // ── 1. Fetch public files (no populate — we do a safe manual lookup) ──
-        const files = await FileMeta.find({
-            archived: false,
-            visibility: 'public',
-        })
-            .sort({ uploadedAt: -1 })
-            .limit(100)
-            .lean();
+        const page = parseInt(req.query.page) || 0;
+        const limit = Math.min(parseInt(req.query.limit) || 20, 50);
+        const source = req.query.source || 'explore';
+        const eventFilter = req.query.eventFilter || 'all';
+        const now = new Date();
 
-        // ── 2. Safely resolve createdBy (only valid ObjectIds) ────────────────
-        const creatorIdStrings = [...new Set(
-            files
-                .map(f => f.createdBy?.toString())
-                .filter(id => isValidObjectId(id))
-        )];
+        const matchQuery = { archived: false, visibility: 'public' };
 
-        const User = mongoose.model('User');
-        const creators = creatorIdStrings.length
-            ? await User.find(
-                { _id: { $in: creatorIdStrings.map(id => new ObjectId(id)) } },
-                'name avatarUrl'
-            ).lean()
-            : [];
-
-        const creatorMap = creators.reduce((acc, u) => {
-            acc[String(u._id)] = u;
-            return acc;
-        }, {});
-
-        // ── 3. Safely resolve event (only valid ObjectIds) ────────────────────
-        const eventIdStrings = [...new Set(
-            files
-                .map(f => f.event?.toString())
-                .filter(id => isValidObjectId(id))
-        )];
-
-        const Contest = require('../models/Contest');
-        const events = eventIdStrings.length
-            ? await Contest.find(
-                { _id: { $in: eventIdStrings.map(id => new ObjectId(id)) } },
-                'title startDate endDate createdBy contestStatus'
-            ).lean()
-            : [];
-
-        const eventMap = events.reduce((acc, e) => {
-            acc[e._id.toString()] = e;
-            return acc;
-        }, {});
-
-        // ── 4. Who does this user follow? ─────────────────────────────────────
-        let followingUserIds = [];
-        if (safeUserId) {
-            try {
-                const followingDocs = await Following.find({
-                    follower: new ObjectId(safeUserId)
-                })
-                    .select('following')
-                    .lean();
-
-                followingUserIds = followingDocs
-                    .map(doc => doc.following ? String(doc.following) : null)
-                    .filter(Boolean);
-
-                console.log(`[FEED] userId=${safeUserId} follows ${followingUserIds.length} users:`, followingUserIds);
-            } catch (followErr) {
-                console.error('[FEED] Error fetching following list:', followErr.message);
-                // Non-fatal — continue with empty following list
-            }
+        // ── Following filter ────────────────────────────────────────────────
+        let followingIds = [];
+        let followingSet = new Set();
+        if (source === 'following' && safeUserId) {
+            followingIds = await Following.find({
+                follower: new ObjectId(safeUserId)
+            }).distinct('following');
+            followingSet = new Set(followingIds.map(id => id.toString()));
+            matchQuery.createdBy = { $in: followingIds };
         }
 
-        // ── 5. Aggregate like counts ──────────────────────────────────────────
-        const validFileObjectIds = files
-            .filter(f => isValidObjectId(f._id?.toString()))
-            .map(f => new ObjectId(f._id.toString()));
+        // ── Event filter ──────────────────────────────────────────────────────
+        if (eventFilter !== 'all') {
+            let eventQuery = {};
+            if (eventFilter === 'active') eventQuery = { startDate: { $lte: now }, endDate: { $gte: now } };
+            if (eventFilter === 'upcoming') eventQuery = { startDate: { $gt: now } };
+            if (eventFilter === 'completed') eventQuery = { endDate: { $lt: now } };
+            if (eventFilter === 'myEvents' && safeUserId) {
+                eventQuery = { createdBy: new ObjectId(safeUserId) };
+            }
+            const Contest = require('../models/Contest');
+            const events = await Contest.find(eventQuery).select('_id');
+            matchQuery.event = { $in: events.map(e => e._id) };
+        }
 
-        let likeCounts = {};
-        if (validFileObjectIds.length > 0) {
-            const aggregationResult = await Like.aggregate([
-                { $match: { fileId: { $in: validFileObjectIds } } },
-                { $group: { _id: '$fileId', count: { $sum: 1 } } }
+        // ── Scored + ranked aggregation (same pattern as swipe) ─────────────
+        const files = await FileMeta.aggregate([
+            { $match: matchQuery },
+            {
+                $addFields: {
+                    freshnessBoost: {
+                        $max: [0, {
+                            $subtract: [
+                                30,
+                                { $divide: [{ $subtract: [now, '$uploadedAt'] }, 86400000] }
+                            ]
+                        }]
+                    }
+                }
+            },
+            {
+                $addFields: {
+                    engagementScore: {
+                        $add: [
+                            { $multiply: [{ $ifNull: ['$likesCount', 0] }, 3] },
+                            { $multiply: [{ $ifNull: ['$commentsCount', 0] }, 2] },
+                            { $ifNull: ['$sharesCount', 0] },
+                            '$freshnessBoost'
+                        ]
+                    }
+                }
+            },
+            { $sort: { engagementScore: -1, uploadedAt: -1 } },
+            { $skip: page * limit },
+            { $limit: limit },
+
+            // ── JOIN user (full profile, same as swipe) ───────────────────────
+            {
+                $lookup: {
+                    from: 'users',
+                    localField: 'createdBy',
+                    foreignField: '_id',
+                    as: 'userInfo',
+                    pipeline: [
+                        {
+                            $project: {
+                                _id: 1,
+                                username: 1,
+                                firstName: 1,
+                                lastName: 1,
+                                name: 1,           // ← keep both for compatibility
+                                email: 1,
+                                avatarUrl: 1,
+                                bio: 1,
+                                dateOfBirth: 1,
+                                gender: 1,
+                                wins: 1,
+                                streakDays: 1,
+                                location: 1,
+                                isProfileCompleted: 1,
+                                badgeTier: 1,
+                            }
+                        }
+                    ]
+                }
+            },
+            { $unwind: { path: '$userInfo', preserveNullAndEmptyArrays: true } },
+
+            // ── JOIN contest/event ──────────────────────────────────────────
+            {
+                $lookup: {
+                    from: 'contests',
+                    localField: 'event',
+                    foreignField: '_id',
+                    as: 'eventInfo',
+                    pipeline: [
+                        {
+                            $project: {
+                                _id: 1,
+                                title: 1,
+                                startDate: 1,
+                                endDate: 1,
+                                createdBy: 1
+                            }
+                        }
+                    ]
+                }
+            },
+            { $unwind: { path: '$eventInfo', preserveNullAndEmptyArrays: true } },
+        ]);
+
+        // ── Liked + Bookmarked sets (same pattern as swipe) ─────────────────
+        let likedSet = new Set();
+        let bookmarkedSet = new Set();
+        if (safeUserId && files.length) {
+            const fileIds = files.map(f => f._id);
+            const userObjectId = new ObjectId(safeUserId);
+
+            const [liked, favorites] = await Promise.all([
+                Like.find({
+                    userId: userObjectId,
+                    fileId: { $in: fileIds }
+                }).distinct('fileId'),
+                Favorite.find({
+                    userId: userObjectId,
+                    fileId: { $in: fileIds }
+                }).distinct('fileId'),
             ]);
-            likeCounts = aggregationResult.reduce((acc, curr) => ({
-                ...acc,
-                [curr._id.toString()]: curr.count
-            }), {});
+            likedSet = new Set(liked.map(id => id.toString()));
+            bookmarkedSet = new Set(favorites.map(id => id.toString()));
         }
 
-        // ── 6. Build feed items ───────────────────────────────────────────────
-        const feed = files.map(f => {
-            if (!f._id) return null;
-
-            const fileId = f._id.toString();
-            const isVideo = f.mimeType?.startsWith('video/') ?? false;
-
-            const createdByIdStr = f.createdBy ? String(f.createdBy) : null;
-            const creator = isValidObjectId(createdByIdStr)
-                ? (creatorMap[createdByIdStr] ?? null)
-                : null;
-            const createdById = creator?._id ? String(creator._id) : null;
-
-            const eventIdStr = f.event?.toString();
-            const event = isValidObjectId(eventIdStr)
-                ? (eventMap[eventIdStr] ?? null)
-                : null;
-
-            let eventStatus = 'general';
-            if (event) {
-                const now = new Date();
-                const start = event.startDate ? new Date(event.startDate) : null;
-                const end = event.endDate ? new Date(event.endDate) : null;
-                if (start && end && !isNaN(start) && !isNaN(end)) {
-                    if (now < start) eventStatus = 'upcoming';
-                    else if (now > end) eventStatus = 'completed';
-                    else eventStatus = 'active';
-                }
-            }
-
-            const isMyEvent = !!(safeUserId && event?.createdBy?.toString() === safeUserId.toString());
-            const isFromFollowing = !!(
-                createdById &&
-                followingUserIds.includes(createdById)
-            );
-
-            return {
-                id: fileId,
-                mediaType: isVideo ? 'reel' : 'image',
-                photo: {
-                    id: fileId,
-                    title: f.title || 'Untitled',
-                    imageUrl: isVideo ? (f.thumbnailUrl || null) : (f.path || null),
-                    category: f.category || 'other',
-                },
-                videoUrl: isVideo ? (f.path || null) : null,
-                eventTitle: event?.title || 'General',
-                eventStatus,
-                isMyEvent,
-                isFromFollowing,
-                isSubmission: f.isSubmission || false,
-                likes: likeCounts[fileId] || 0,
-                comments: f.commentsCount || 0,
-                isLiked: false,
-                user: {
-                    id: createdById || null,
-                    name: creator?.name || 'Anonymous',
-                    avatarUrl: creator?.avatarUrl || ''
-                }
-            };
-        }).filter(Boolean);
-
-        // ── 7. Populate isLiked ───────────────────────────────────────────────
-        // if (safeUserId) {
-        //     const likedFileIds = (await Like.find({ userId: safeUserId }).distinct('fileId'))
-        //         .map(id => id.toString());
-        //     feed.forEach(item => {
-        //         item.isLiked = likedFileIds.includes(item.id);
-        //     });
-        // }
-        // ── 7. Populate isLiked ───────────────────────────────────────────────
-        if (safeUserId) {
-            const likedFileIds = (await Like.find({
-                userId: new ObjectId(safeUserId)
-            }).distinct('fileId'))
-                .map(id => id.toString());
-            feed.forEach(item => {
-                item.isLiked = likedFileIds.includes(item.id);
-            });
-        }
+        // ── Build feed ──────────────────────────────────────────────────────
+        const feed = files.map(f =>
+            formatReel(f, safeUserId, likedSet, bookmarkedSet, followingSet, now)
+        );
 
         const followingCount = feed.filter(i => i.isFromFollowing).length;
         console.log(`[FEED] total=${feed.length}, fromFollowing=${followingCount}, userId=${safeUserId}`);
 
-        return res.status(200).json({ status: 'success', count: feed.length, feed });
+        return res.status(200).json({
+            status: 'success',
+            count: feed.length,
+            reels: feed,        
+            nextPage: page + 1,
+            hasMore: files.length === limit,
+        });
 
     } catch (e) {
         console.error('FEED_API_ERROR:', e.message, e.stack);
