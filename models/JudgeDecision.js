@@ -21,8 +21,24 @@ const JudgeDecisionSchema = new mongoose.Schema({
         required: true
     },
 
-    aiScore: Number,
-    aiRank: Number,
+    userId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User',
+        required: true,
+        index: true
+    },
+    position: {
+        type: Number,
+        default: null
+    },
+    aiScore: {
+        type: Number,
+        default: null
+    },
+    aiRank: {
+        type: Number,
+        default: null
+    },
 
     finalDecision: {
         type: String,
@@ -32,9 +48,12 @@ const JudgeDecisionSchema = new mongoose.Schema({
 
     overrideReason: {
         type: String,
-        maxlength: 1000
+        default: null
     },
-
+    selectedAt: {
+        type: Date,
+        default: Date.now
+    },
     overridesAI: {
         type: Boolean,
         default: false
@@ -42,9 +61,8 @@ const JudgeDecisionSchema = new mongoose.Schema({
 
 }, { timestamps: true });
 
-JudgeDecisionSchema.index(
-    { contestId: 1, entryId: 1 },
-    { unique: true }
-);
+
+JudgeDecisionSchema.index({ contestId: 1, finalDecision: 1 });
+JudgeDecisionSchema.index({ contestId: 1, entryId: 1 }, { unique: true });
 
 module.exports = mongoose.model('JudgeDecision', JudgeDecisionSchema);

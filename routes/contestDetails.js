@@ -1,5 +1,4 @@
-
-// routes/contestDetails.js (or add to your existing contest routes)
+// routes/contestDetails.js — COMPLETE FIXED FILE
 const express = require('express');
 const router = express.Router();
 const mongoose = require('mongoose');
@@ -7,13 +6,190 @@ const Contest = require('../models/Contest');
 const ContestEntry = require('../models/ContestEntry');
 const Payment = require('../models/Payment');
 const FileMeta = require('../models/FileMeta');
-const { authMiddleware: authMiddleware } = require('../middleware/auth');
+const { authMiddleware } = require('../middleware/auth');
 const Submission = require('../models/Submission');
 const JudgeDecision = require('../models/JudgeDecision');
 const { getUserBadgeInfo } = require('../utils/badgeUtils');
+const User = require('../models/User');
 const multer = require('multer');
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SHARED HELPER: resolves winners for any contestId after the contest ends.
+// Handles the case where JudgeDecision.userId is null (bad data from selectWinners).
+// ─────────────────────────────────────────────────────────────────────────────
+async function resolveWinners(contestId, now, endDate) {
+    if (now < endDate) return [];
+
+    const judgeDecisions = await JudgeDecision.find({
+        contestId: new mongoose.Types.ObjectId(contestId),
+        finalDecision: 'winner'
+    })
+        .populate('userId', 'name firstName lastName username email avatarUrl profileImage avatar photo')
+        .sort({ position: 1 })
+        .limit(3)
+        .lean();
+
+    if (judgeDecisions.length === 0) return [];
+
+    const winners = [];
+
+    for (const decision of judgeDecisions) {
+        const entryObjectId = decision.entryId;
+        let mediaUrl = null;
+        let thumbnailUrl = null;
+
+        let resolvedUserData = decision.userId || null;
+        let resolvedUserId = decision.userId?._id?.toString() || null;
+
+        // ── TIER 1: Try Submission model ──────────────────────────────────
+        if (entryObjectId) {
+            const sub = await Submission.findById(entryObjectId)
+                .select('fileId mediaUrl thumbnailUrl userId')
+                .lean();
+
+            if (sub) {
+                // Get media from Submission → FileMeta
+                if (sub.fileId) {
+                    const fileMeta = await FileMeta.findById(sub.fileId)
+                        .select('path thumbnailUrl')
+                        .lean();
+                    if (fileMeta) {
+                        mediaUrl = fileMeta.path;
+                        thumbnailUrl = fileMeta.thumbnailUrl || fileMeta.path;
+                    }
+                } else if (sub.mediaUrl) {
+                    mediaUrl = sub.mediaUrl;
+                    thumbnailUrl = sub.thumbnailUrl || sub.mediaUrl;
+                }
+
+                if (!resolvedUserId && sub.userId) {
+                    resolvedUserId = sub.userId.toString();
+                }
+            }
+        }
+
+        // ── TIER 2: Try ContestEntry model ────────────────────────────────
+        // (entryId was saved as ContestEntry._id in many cases)
+        if (entryObjectId && (!mediaUrl || !resolvedUserId)) {
+            const ce = await ContestEntry.findById(entryObjectId)
+                .select('photos videos userId')
+                .lean();
+
+            if (ce) {
+                if (!mediaUrl) {
+                    const mediaIds = [...(ce.photos || []), ...(ce.videos || [])].filter(Boolean);
+                    if (mediaIds.length > 0) {
+                        const fileMeta = await FileMeta.findById(mediaIds[0])
+                            .select('path thumbnailUrl')
+                            .lean();
+                        if (fileMeta) {
+                            mediaUrl = fileMeta.path;
+                            thumbnailUrl = fileMeta.thumbnailUrl || fileMeta.path;
+                        }
+                    }
+                }
+
+                if (!resolvedUserId && ce.userId) {
+                    resolvedUserId = ce.userId.toString();
+                }
+            }
+        }
+
+        // ── Resolve user name/avatar if populate returned null ────────────
+        // This happens when JudgeDecision.userId was null in the DB.
+        // resolvedUserId may now be populated from Submission or ContestEntry above.
+        // if (!resolvedUserData && resolvedUserId) {
+        //     resolvedUserData = await User.findById(resolvedUserId)
+        //         .select('name firstName username avatarUrl')
+        //         .lean();
+        // }
+
+        if (!resolvedUserData && resolvedUserId) {
+            try {
+                // Try the User model — adjust the path if needed for your project
+                const UserModel = require('../models/User');
+                resolvedUserData = await UserModel.findById(resolvedUserId)
+                    .select('name firstName lastName username email avatarUrl profileImage avatar photo')
+                    .lean();
+
+                // DEBUG: uncomment this line if userName is still "Unknown"
+                // console.log(`[resolveWinners] userId=${resolvedUserId} userDoc=`, JSON.stringify(resolvedUserData));
+            } catch (e) {
+                console.warn('[resolveWinners] User model lookup failed:', e.message);
+            }
+        }
+
+        // ── TIER 3: FileMeta fallback by userId + contestId ───────────────
+        // NOTE: This now uses resolvedUserId (not decision.userId?._id)
+        // so it runs even when JudgeDecision.userId was null.
+        if (!mediaUrl && resolvedUserId) {
+            const fallbackFile = await FileMeta.findOne({
+                event: new mongoose.Types.ObjectId(contestId),
+                createdBy: new mongoose.Types.ObjectId(resolvedUserId),
+                isSubmission: true,
+                archived: false,
+                visibility: 'public'
+            })
+                .sort({ uploadedAt: -1 })
+                .select('path thumbnailUrl')
+                .lean();
+
+            if (fallbackFile) {
+                mediaUrl = fallbackFile.path;
+                thumbnailUrl = fallbackFile.thumbnailUrl || fallbackFile.path;
+            }
+        }
+
+        // ── TIER 4: Last resort — any FileMeta for this contest entry ─────
+        // No userId filter — just find the FileMeta that matches the entryId
+        if (!mediaUrl && entryObjectId) {
+            const lastResort = await FileMeta.findOne({
+                event: new mongoose.Types.ObjectId(contestId),
+                isSubmission: true,
+            })
+                .sort({ uploadedAt: -1 })
+                .select('path thumbnailUrl createdBy')
+                .lean();
+
+            if (lastResort) {
+                mediaUrl = lastResort.path;
+                thumbnailUrl = lastResort.thumbnailUrl || lastResort.path;
+                // Also recover userId from FileMeta if nothing else worked
+                if (!resolvedUserId && lastResort.createdBy) {
+                    resolvedUserId = lastResort.createdBy.toString();
+                    if (!resolvedUserData) {
+                        resolvedUserData = await User.findById(resolvedUserId)
+                            .select('name firstName username avatarUrl')
+                            .lean();
+                    }
+                }
+            }
+        }
+
+        winners.push({
+            position: decision.position,
+            entryId: entryObjectId?.toString() || null,
+            userId: resolvedUserId,
+            userName: resolvedUserData?.name
+                || resolvedUserData?.firstName
+                || resolvedUserData?.username
+                || 'Unknown',
+            userAvatar: resolvedUserData?.avatarUrl || null,
+            mediaUrl,
+            thumbnailUrl,
+            aiScore: decision.aiScore || null,
+            aiRank: decision.aiRank || null,
+            overrideReason: decision.overrideReason || null,
+        });
+    }
+
+    return winners;
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 function formatHighlightPhoto(photo, contestEndDate, options = {}) {
     if (!photo) return null;
@@ -49,12 +225,12 @@ function formatHighlightPhoto(photo, contestEndDate, options = {}) {
         peopleCount: photo.peopleCount || 0,
         category: photo.category || 'other',
         likesCount: photo.likesCount || 0,
-        isFavorite: isFavorite,
+        isFavorite,
         aspectRatio: photo.aspectRatio || 9 / 16,
         blurHash: photo.blurHash || null,
-        userName: userName,
-        isCurated: isCurated,
-        isLiked: isLiked,
+        userName,
+        isCurated,
+        isLiked,
     };
 }
 
@@ -68,142 +244,59 @@ const storage = multer.diskStorage({
 
 const upload = multer({
     storage,
-    limits: { fileSize: 500 * 1024 * 1024 }, // 500MB max
+    limits: { fileSize: 500 * 1024 * 1024 },
     fileFilter: (req, file, cb) => {
         const allowed = ['image/jpeg', 'image/png', 'image/webp', 'video/mp4', 'video/quicktime'];
-        allowed.includes(file.mimetype)
-            ? cb(null, true)
-            : cb(new Error('Invalid file type'));
+        allowed.includes(file.mimetype) ? cb(null, true) : cb(new Error('Invalid file type'));
     }
 });
 
 
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /:contestId/details
+// ─────────────────────────────────────────────────────────────────────────────
 router.get('/:contestId/details', authMiddleware, async (req, res) => {
     try {
         const { contestId } = req.params;
         const userId = req.user?.id || null;
         console.log('Contest details request:', { contestId, userId: userId || 'anonymous' });
 
-        // Validate contestId
         if (!contestId || !mongoose.Types.ObjectId.isValid(contestId)) {
-            return res.status(400).json({
-                success: false,
-                message: 'Invalid contest ID'
-            });
+            return res.status(400).json({ success: false, message: 'Invalid contest ID' });
         }
 
-        // Fetch contest with highlight photos populated
         const contest = await Contest.findById(contestId).lean();
-
         if (!contest) {
-            return res.status(404).json({
-                success: false,
-                message: 'Contest not found'
-            });
+            return res.status(404).json({ success: false, message: 'Contest not found' });
         }
 
-        let winners = [];
         const now = new Date();
         const endDate = new Date(contest.endDate);
-        const phase3Start = new Date(endDate);
-        phase3Start.setDate(phase3Start.getDate() + 3); // 3-day window
+        const startDate = new Date(contest.startDate);
 
-        // Only show winners if we're in Phase 3 (after selection window)
-        if (now >= phase3Start) {
-            const judgeDecisions = await JudgeDecision.find({
-                contestId: new mongoose.Types.ObjectId(contestId),
-                finalDecision: 'winner'
-            })
-                .populate('entryId')
-                .populate('userId', 'name firstName username avatarUrl')
-                .sort({ position: 1 })
-                .limit(3)
-                .lean();
+        // ── Winners ───────────────────────────────────────────────────────
+        const winners = await resolveWinners(contestId, now, endDate);
 
-            if (judgeDecisions.length > 0) {
-                // Fetch media for each winner
-                for (const decision of judgeDecisions) {
-                    let mediaUrl = null;
-                    let thumbnailUrl = null;
-
-                    // Try to get media from different sources
-                    if (decision.entryId) {
-                        // If entryId is a Submission
-                        if (decision.entryId.fileId) {
-                            const fileMeta = await FileMeta.findById(decision.entryId.fileId)
-                                .select('path thumbnailUrl')
-                                .lean();
-                            if (fileMeta) {
-                                mediaUrl = fileMeta.path;
-                                thumbnailUrl = fileMeta.thumbnailUrl || fileMeta.path;
-                            }
-                        }
-                        // If entryId has direct mediaUrl
-                        else if (decision.entryId.mediaUrl) {
-                            mediaUrl = decision.entryId.mediaUrl;
-                            thumbnailUrl = decision.entryId.thumbnailUrl || decision.entryId.mediaUrl;
-                        }
-                    }
-
-                    // Fallback: search FileMeta by user + contest
-                    if (!mediaUrl && decision.userId) {
-                        const fallbackFile = await FileMeta.findOne({
-                            event: new mongoose.Types.ObjectId(contestId),
-                            createdBy: decision.userId._id,
-                            isSubmission: true,
-                            archived: false
-                        }).select('path thumbnailUrl').lean();
-
-                        if (fallbackFile) {
-                            mediaUrl = fallbackFile.path;
-                            thumbnailUrl = fallbackFile.thumbnailUrl || fallbackFile.path;
-                        }
-                    }
-
-                    const userData = decision.userId;
-                    winners.push({
-                        position: decision.position,
-                        entryId: decision.entryId?._id?.toString() || null,
-                        userId: decision.userId?._id?.toString() || null,
-                        userName: userData?.name || userData?.firstName || userData?.username || 'Unknown',
-                        userAvatar: userData?.avatarUrl || null,
-                        mediaUrl: mediaUrl,
-                        thumbnailUrl: thumbnailUrl,
-                        aiScore: decision.aiScore || null,
-                        aiRank: decision.aiRank || null,
-                        overrideReason: decision.overrideReason || null,
-                    });
-                }
-            }
-        }
-
-
-        // Fetch actual photo documents for highlights
+        // ── Highlight photos ──────────────────────────────────────────────
         let highlightPhotos = [];
         if (contest.highlightPhotos?.length > 0) {
-            const photos = await FileMeta.find({
-                _id: { $in: contest.highlightPhotos }
-            })
+            const photos = await FileMeta.find({ _id: { $in: contest.highlightPhotos } })
                 .select('_id path thumbnailPath title subtitle description location uploadedAt peopleCount category likesCount aspectRatio blurHash')
                 .lean();
 
-            // Maintain order from contest.highlightPhotos array
             const photoMap = {};
             photos.forEach(p => photoMap[p._id.toString()] = p);
 
             highlightPhotos = contest.highlightPhotos
-                .map(id => formatHighlightPhoto(photoMap[id.toString()], contest.endDate, {
-                    isCurated: true
-                }))
-                .filter(p => p !== null);
+                .map(id => formatHighlightPhoto(photoMap[id.toString()], contest.endDate, { isCurated: true }))
+                .filter(Boolean);
         }
 
-        // 2. FETCH USER'S SUBMISSIONS FOR THIS CONTEST (What they actually submitted)
+        // ── User submissions ──────────────────────────────────────────────
         let userSubmissions = [];
         let contestEntry = null;
 
         if (userId) {
-            // Try ContestEntry first (your current model)
             const entry = await ContestEntry.findOne({
                 userId: new mongoose.Types.ObjectId(userId),
                 contestId: new mongoose.Types.ObjectId(contestId)
@@ -218,16 +311,9 @@ router.get('/:contestId/details', authMiddleware, async (req, res) => {
                     videos: entry.videos || [],
                 };
 
-                const allMediaIds = [
-                    ...(entry.photos || []),
-                    ...(entry.videos || [])
-                ].filter(Boolean);
-
+                const allMediaIds = [...(entry.photos || []), ...(entry.videos || [])].filter(Boolean);
                 if (allMediaIds.length > 0) {
-                    const mediaDocs = await FileMeta.find({
-                        _id: { $in: allMediaIds }
-                    }).lean();
-
+                    const mediaDocs = await FileMeta.find({ _id: { $in: allMediaIds } }).lean();
                     const mediaMap = {};
                     mediaDocs.forEach(p => mediaMap[p._id.toString()] = p);
 
@@ -244,32 +330,23 @@ router.get('/:contestId/details', authMiddleware, async (req, res) => {
                 }
             }
 
-            // Also check Submission model (used in home route)
             const submissions = await Submission.find({
                 userId: new mongoose.Types.ObjectId(userId),
                 contestId: new mongoose.Types.ObjectId(contestId)
             }).lean();
 
             if (submissions.length > 0 && userSubmissions.length === 0) {
-                // Gather all fileIds from submissions
-                const fileIds = submissions
-                    .map(s => s.fileId)
-                    .filter(Boolean);
-
+                const fileIds = submissions.map(s => s.fileId).filter(Boolean);
                 if (fileIds.length > 0) {
-                    const fileDocs = await FileMeta.find({
-                        _id: { $in: fileIds }
-                    }).lean();
-
-                    userSubmissions = fileDocs.map(p =>
-                        formatHighlightPhoto(p, contest.endDate, {
+                    const fileDocs = await FileMeta.find({ _id: { $in: fileIds } }).lean();
+                    userSubmissions = fileDocs
+                        .map(p => formatHighlightPhoto(p, contest.endDate, {
                             isCurated: false,
                             userName: req.user?.name || req.user?.username || 'You'
-                        })
-                    ).filter(Boolean);
+                        }))
+                        .filter(Boolean);
                 }
 
-                // Build contestEntry from the first submission if we don't have one
                 if (!contestEntry) {
                     const firstSub = submissions[0];
                     contestEntry = {
@@ -290,21 +367,17 @@ router.get('/:contestId/details', authMiddleware, async (req, res) => {
                 }).lean();
 
                 if (directFiles.length > 0) {
-                    userSubmissions = directFiles.map(p =>
-                        formatHighlightPhoto(p, contest.endDate, {
+                    userSubmissions = directFiles
+                        .map(p => formatHighlightPhoto(p, contest.endDate, {
                             isCurated: false,
                             userName: req.user?.name || req.user?.username || 'You'
-                        })
-                    ).filter(Boolean);
+                        }))
+                        .filter(Boolean);
                 }
             }
-
-
         }
 
-
-
-        // Payment status (only if authenticated)
+        // ── Payment status ────────────────────────────────────────────────
         let paymentStatus = null;
         if (userId) {
             const payment = await Payment.findOne({
@@ -325,48 +398,25 @@ router.get('/:contestId/details', authMiddleware, async (req, res) => {
             }
         }
 
-        // // User's entry (only if authenticated)
-        // if (userId) {
-        //     const entry = await ContestEntry.findOne({ userId, contestId }).lean();
-        //     if (entry) {
-        //         contestEntry = {
-        //             id: entry._id.toString(),
-        //             status: entry.status,
-        //             submittedAt: entry.submittedAt,
-        //             photos: entry.photos || [],
-        //             videos: entry.videos || [],
-        //         };
-        //     }
-        // }
-
-        const rawBanner = typeof contest.bannerImage === 'string'
-            ? contest.bannerImage.trim()
-            : null;
-
-        // Cover image priority: highlight photo > banner image > user submission > null
+        const rawBanner = typeof contest.bannerImage === 'string' ? contest.bannerImage.trim() : null;
         const coverImage = highlightPhotos.length > 0
             ? highlightPhotos[0].url
             : (rawBanner || (userSubmissions.length > 0 ? userSubmissions[0].url : null));
 
-        // 4. STATS - Count from BOTH models to be safe
+        // ── Stats ─────────────────────────────────────────────────────────
         const entryCount = await ContestEntry.countDocuments({
             contestId: new mongoose.Types.ObjectId(contestId),
             status: { $in: ['submitted', 'approved', 'rejected', 'pending'] }
         });
-
         const submissionCount = await Submission.countDocuments({
             contestId: new mongoose.Types.ObjectId(contestId)
         });
-
-
-        // Stats
         const totalSubmissions = Math.max(entryCount, submissionCount) || (entryCount + submissionCount);
 
         let mySubmissions = 0;
         if (userId) {
-            const userEntry = contestEntry;
-            if (userEntry) {
-                mySubmissions = (userEntry.photos?.length || 0) + (userEntry.videos?.length || 0);
+            if (contestEntry) {
+                mySubmissions = (contestEntry.photos?.length || 0) + (contestEntry.videos?.length || 0);
             }
             if (mySubmissions === 0) {
                 mySubmissions = await Submission.countDocuments({
@@ -376,26 +426,18 @@ router.get('/:contestId/details', authMiddleware, async (req, res) => {
             }
         }
 
-        // Status calculation - PRIORITIZE DATES over isOpenForSubmissions for timeLabel consistency
-        // const now = new Date();
-        const startDate = new Date(contest.startDate);
-        // const endDate = new Date(contest.endDate);
-
-        // Date-based status (what users see)
+        // ── Status ────────────────────────────────────────────────────────
         const dateBasedIsUpcoming = now < startDate;
         const dateBasedIsCompleted = now > endDate;
         const dateBasedIsActive = !dateBasedIsUpcoming && !dateBasedIsCompleted;
 
-        // Functional status (can they actually submit?)
         const isOpenForSubmissions = ['published', 'ongoing'].includes(contest.contestStatus) && dateBasedIsActive;
         const isActive = dateBasedIsActive && isOpenForSubmissions;
         const isUpcoming = dateBasedIsUpcoming;
         const isCompleted = dateBasedIsCompleted || (dateBasedIsActive && !isOpenForSubmissions);
 
-        // Time label - ALWAYS based on dates, not submission status
         let timeLabel = '';
-        let timeStatus = ''; // 'upcoming', 'active', 'completed' for UI styling
-
+        let timeStatus = '';
         if (dateBasedIsUpcoming) {
             const daysUntil = Math.ceil((startDate - now) / (1000 * 60 * 60 * 24));
             timeLabel = daysUntil === 1 ? 'Starts in 1 day' : `Starts in ${daysUntil} days`;
@@ -410,14 +452,6 @@ router.get('/:contestId/details', authMiddleware, async (req, res) => {
             timeStatus = 'completed';
         }
 
-        // Override if submissions are closed but contest is date-active
-        // let displayStatus = timeStatus;
-        // let statusBadge = isActive ? 'Active' : (isUpcoming ? 'Upcoming' : 'Completed');
-
-        // // If date says active but submissions are closed, show "Ending Soon" or keep date-based label
-        // if (dateBasedIsActive && !isOpenForSubmissions) {
-        //     statusBadge = 'Closing Soon';
-        // }
         console.log('Sending response:', {
             userId,
             totalSubmissions,
@@ -426,6 +460,7 @@ router.get('/:contestId/details', authMiddleware, async (req, res) => {
             highlightCount: highlightPhotos.length,
             userSubmissionCount: userSubmissions.length,
             hasBanner: !!rawBanner,
+            winnersCount: winners.length,
         });
 
         res.json({
@@ -439,23 +474,21 @@ router.get('/:contestId/details', authMiddleware, async (req, res) => {
                 entryFee: contest.entryFee || 0,
                 startDate: contest.startDate,
                 endDate: contest.endDate,
-                isActive,           // Can user submit?
-                isUpcoming,         // Before start date?
-                isCompleted,        // After end date or closed?
-                isOpenForSubmissions, // Explicit flag
-                timeLabel,          // Date-based label
-                timeStatus,         // 'upcoming' | 'active' | 'completed'
-                // displayStatus,      // For UI theming
-                // statusBadge,        // Text for badge
+                isActive,
+                isUpcoming,
+                isCompleted,
+                isOpenForSubmissions,
+                timeLabel,
+                timeStatus,
                 totalSubmissions,
                 mySubmissions,
                 highlightPhotos,
                 userSubmissions,
                 userBadge: userId ? await getUserBadgeInfo(userId) : null,
-                winners: winners,
+                winners,
                 winnersAnnounced: winners.length > 0,
                 bannerImage: rawBanner || null,
-                coverImage: coverImage,
+                coverImage,
                 contestEntry,
                 paymentStatus,
                 hasParticipated: !!contestEntry || mySubmissions > 0,
@@ -479,7 +512,9 @@ router.get('/:contestId/details', authMiddleware, async (req, res) => {
 });
 
 
-// GET endpoint specifically for checking payment status
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /:contestId/payment-status
+// ─────────────────────────────────────────────────────────────────────────────
 router.get('/:contestId/payment-status', authMiddleware, async (req, res) => {
     try {
         const { contestId } = req.params;
@@ -496,10 +531,7 @@ router.get('/:contestId/payment-status', authMiddleware, async (req, res) => {
         }).sort({ createdAt: -1 });
 
         if (!payment) {
-            return res.json({
-                status: 'not_found',
-                message: 'No payment record found'
-            });
+            return res.json({ status: 'not_found', message: 'No payment record found' });
         }
 
         res.json({
@@ -521,7 +553,10 @@ router.get('/:contestId/payment-status', authMiddleware, async (req, res) => {
     }
 });
 
-// GET endpoint for checking contest entry status
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /:contestId/entry-status
+// ─────────────────────────────────────────────────────────────────────────────
 router.get('/:contestId/entry-status', authMiddleware, async (req, res) => {
     try {
         const { contestId } = req.params;
@@ -531,16 +566,9 @@ router.get('/:contestId/entry-status', authMiddleware, async (req, res) => {
             return res.status(400).json({ message: 'Invalid contest ID' });
         }
 
-        const contestEntry = await ContestEntry.findOne({
-            userId,
-            contestId
-        });
-
+        const contestEntry = await ContestEntry.findOne({ userId, contestId });
         if (!contestEntry) {
-            return res.json({
-                status: 'not_submitted',
-                message: 'No submission found'
-            });
+            return res.json({ status: 'not_submitted', message: 'No submission found' });
         }
 
         res.json({
@@ -561,218 +589,154 @@ router.get('/:contestId/entry-status', authMiddleware, async (req, res) => {
     }
 });
 
-router.post(
-    '/:contestId/submit',
-    authMiddleware,
-    upload.single('media'),
-    async (req, res) => {
-        const session = await mongoose.startSession();
-        session.startTransaction();
 
-        try {
-            const { contestId } = req.params;
-            const userId = req.user.id;
-            const { caption } = req.body;
-            const file = req.file;
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /:contestId/submit
+// ─────────────────────────────────────────────────────────────────────────────
+router.post('/:contestId/submit', authMiddleware, upload.single('media'), async (req, res) => {
+    const session = await mongoose.startSession();
+    session.startTransaction();
 
-            // ── 1. Basic validation ──────────────────────────────────────────
-            if (!mongoose.Types.ObjectId.isValid(contestId)) {
-                return res.status(400).json({ success: false, message: 'Invalid contest ID' });
-            }
+    try {
+        const { contestId } = req.params;
+        const userId = req.user.id;
+        const { caption } = req.body;
+        const file = req.file;
 
-            if (!file) {
-                return res.status(400).json({ success: false, message: 'Media file is required' });
-            }
-
-            // ── 2. Load contest ──────────────────────────────────────────────
-            const contest = await Contest.findById(contestId).session(session);
-            if (!contest) {
-                return res.status(404).json({ success: false, message: 'Contest not found' });
-            }
-
-            if (!contest.isOpenForSubmissions) {
-                return res.status(400).json({ success: false, message: 'Contest is not open for submissions' });
-            }
-
-            // Check allowed media types
-            const isVideo = file.mimetype.startsWith('video/');
-            const mediaType = isVideo ? 'video' : 'image';
-            if (!contest.allowedMediaTypes.includes(mediaType)) {
-                return res.status(400).json({
-                    success: false,
-                    message: `This contest only allows: ${contest.allowedMediaTypes.join(', ')}`
-                });
-            }
-
-            // ── 3. Check duplicate submission ────────────────────────────────
-            const existingEntry = await ContestEntry.findOne({ userId, contestId }).session(session);
-            if (existingEntry && ['submitted', 'paid'].includes(existingEntry.status)) {
-                return res.status(400).json({
-                    success: false,
-                    message: 'You have already submitted to this contest'
-                });
-            }
-
-            // ── 4. Payment check ─────────────────────────────────────────────
-            let paymentId = null;
-
-            if (contest.entryFee && contest.entryFee > 0) {
-                const payment = await Payment.findOne({
-                    userId,
-                    contestId,
-                    status: 'verified',
-                    used: false
-                }).session(session);
-
-                if (!payment) {
-                    return res.status(402).json({
-                        success: false,
-                        message: 'Payment required. Please complete payment first.',
-                        entryFee: contest.entryFee
-                    });
-                }
-
-                payment.used = true;
-                await payment.save({ session });
-                paymentId = payment._id;
-            } else {
-                // Free contest — create a dummy/free payment record or use a sentinel
-                // If paymentId is truly required in your schema, create a free Payment record:
-                const freePayment = await Payment.create([{
-                    userId,
-                    contestId,
-                    status: 'verified',
-                    amount: 0,
-                    used: true,
-                    type: 'free'
-                }], { session });
-                paymentId = freePayment[0]._id;
-            }
-
-            // ── 5. Upload file to your storage (Cloudinary / S3 / local) ─────
-            // Replace this block with your actual upload logic:
-            let mediaUrl, thumbnailUrl, cloudId;
-
-            if (isVideo) {
-                // Example: Cloudinary video upload
-                // const result = await cloudinary.uploader.upload(file.path, { resource_type: 'video', ... });
-                // mediaUrl = result.secure_url;
-                // thumbnailUrl = result.secure_url.replace('/upload/', '/upload/so_0/').replace(/\.\w+$/, '.jpg');
-                // cloudId = result.public_id;
-
-                mediaUrl = `/uploads/${file.filename}`;       // ← replace with real URL
-                thumbnailUrl = `/uploads/${file.filename}`;   // ← replace with thumbnail
-                cloudId = file.filename;
-            } else {
-                // Example: Cloudinary image upload
-                // const result = await cloudinary.uploader.upload(file.path, { folder: 'contests' });
-                // mediaUrl = result.secure_url;
-                // thumbnailUrl = result.secure_url;
-                // cloudId = result.public_id;
-
-                mediaUrl = `/uploads/${file.filename}`;       // ← replace with real URL
-                thumbnailUrl = `/uploads/${file.filename}`;
-                cloudId = file.filename;
-            }
-
-            // ── 6. Create FileMeta ← THIS IS THE MISSING PIECE ──────────────
-            // Without this, the feed query (FileMeta.find) will never see the submission
-            const [fileMeta] = await FileMeta.create([{
-                fileName: file.filename,
-                originalName: file.originalname,
-                mimeType: file.mimetype,
-                size: file.size,
-                path: mediaUrl,              // public URL for feed
-                thumbnailUrl: thumbnailUrl,
-                createdBy: userId,
-                event: contestId,            // ← links to contest, feeds eventTitle in feed
-                isSubmission: true,          // ← marks it as a contest submission
-                isVideo: isVideo,
-                visibility: 'public',        // ← required for feed query
-                archived: false,             // ← required for feed query
-                title: caption || '',
-                category: contest.category || 'other',
-                cloudId: cloudId,
-            }], { session });
-
-            // ── 7. Create or update ContestEntry ────────────────────────────
-            await ContestEntry.findOneAndUpdate(
-                { contestId, userId },
-                {
-                    $set: {
-                        paymentId,
-                        status: 'submitted',
-                        submittedAt: new Date(),
-                    }
-                },
-                { upsert: true, session, new: true }
-            );
-
-            // ── 8. Increment contest submission count ────────────────────────
-            await Contest.findByIdAndUpdate(
-                contestId,
-                { $inc: { totalSubmissions: 1 }, $addToSet: { participants: userId } },
-                { session }
-            );
-
-            await session.commitTransaction();
-
-            // ── 9. Return response matching Flutter's UserEventSubmissionResponse ──
-            return res.status(201).json({
-                success: true,
-                message: 'Submission successful',
-                submission: {
-                    id: fileMeta._id.toString(),          // Flutter: Submission.id
-                    contestId: contestId,
-                    mediaType: mediaType,
-                    caption: caption || '',
-                    status: 'submitted',
-                    submittedAt: fileMeta.uploadedAt,
-                    file: {
-                        id: fileMeta._id.toString(),      // Flutter: FileClass.id
-                        mimeType: file.mimetype,
-                        mediaUrl: mediaUrl,
-                        thumbnailUrl: thumbnailUrl,
-                    }
-                }
-            });
-
-        } catch (err) {
-            await session.abortTransaction();
-            console.error('SUBMIT CONTEST ENTRY ERROR:', err);
-
-            // Handle duplicate key (race condition on double submit)
-            if (err.code === 11000) {
-                return res.status(400).json({ success: false, message: 'You have already submitted to this contest' });
-            }
-
-            return res.status(500).json({
-                success: false,
-                message: 'Failed to submit entry',
-                error: process.env.NODE_ENV === 'development' ? err.message : 'Internal server error'
-            });
-        } finally {
-            session.endSession();
+        if (!mongoose.Types.ObjectId.isValid(contestId)) {
+            return res.status(400).json({ success: false, message: 'Invalid contest ID' });
         }
-    }
-);
+        if (!file) {
+            return res.status(400).json({ success: false, message: 'Media file is required' });
+        }
 
-// NEW ROUTE: Add to routes/contest.js
+        const contest = await Contest.findById(contestId).session(session);
+        if (!contest) {
+            return res.status(404).json({ success: false, message: 'Contest not found' });
+        }
+        if (!contest.isOpenForSubmissions) {
+            return res.status(400).json({ success: false, message: 'Contest is not open for submissions' });
+        }
+
+        const isVideo = file.mimetype.startsWith('video/');
+        const mediaType = isVideo ? 'video' : 'image';
+        if (!contest.allowedMediaTypes.includes(mediaType)) {
+            return res.status(400).json({
+                success: false,
+                message: `This contest only allows: ${contest.allowedMediaTypes.join(', ')}`
+            });
+        }
+
+        const existingEntry = await ContestEntry.findOne({ userId, contestId }).session(session);
+        if (existingEntry && ['submitted', 'paid'].includes(existingEntry.status)) {
+            return res.status(400).json({ success: false, message: 'You have already submitted to this contest' });
+        }
+
+        let paymentId = null;
+        if (contest.entryFee && contest.entryFee > 0) {
+            const payment = await Payment.findOne({ userId, contestId, status: 'verified', used: false }).session(session);
+            if (!payment) {
+                return res.status(402).json({
+                    success: false,
+                    message: 'Payment required. Please complete payment first.',
+                    entryFee: contest.entryFee
+                });
+            }
+            payment.used = true;
+            await payment.save({ session });
+            paymentId = payment._id;
+        } else {
+            const freePayment = await Payment.create([{
+                userId, contestId, status: 'verified', amount: 0, used: true, type: 'free'
+            }], { session });
+            paymentId = freePayment[0]._id;
+        }
+
+        let mediaUrl = `/uploads/${file.filename}`;
+        let thumbnailUrl = `/uploads/${file.filename}`;
+        let cloudId = file.filename;
+
+        const [fileMeta] = await FileMeta.create([{
+            fileName: file.filename,
+            originalName: file.originalname,
+            mimeType: file.mimetype,
+            size: file.size,
+            path: mediaUrl,
+            thumbnailUrl,
+            createdBy: userId,
+            event: contestId,
+            isSubmission: true,
+            isVideo,
+            visibility: 'public',
+            archived: false,
+            title: caption || '',
+            category: contest.category || 'other',
+            cloudId,
+        }], { session });
+
+        await ContestEntry.findOneAndUpdate(
+            { contestId, userId },
+            { $set: { paymentId, status: 'submitted', submittedAt: new Date() } },
+            { upsert: true, session, new: true }
+        );
+
+        await Contest.findByIdAndUpdate(
+            contestId,
+            { $inc: { totalSubmissions: 1 }, $addToSet: { participants: userId } },
+            { session }
+        );
+
+        await session.commitTransaction();
+
+        return res.status(201).json({
+            success: true,
+            message: 'Submission successful',
+            submission: {
+                id: fileMeta._id.toString(),
+                contestId,
+                mediaType,
+                caption: caption || '',
+                status: 'submitted',
+                submittedAt: fileMeta.uploadedAt,
+                file: {
+                    id: fileMeta._id.toString(),
+                    mimeType: file.mimetype,
+                    mediaUrl,
+                    thumbnailUrl,
+                }
+            }
+        });
+
+    } catch (err) {
+        await session.abortTransaction();
+        console.error('SUBMIT CONTEST ENTRY ERROR:', err);
+        if (err.code === 11000) {
+            return res.status(400).json({ success: false, message: 'You have already submitted to this contest' });
+        }
+        return res.status(500).json({
+            success: false,
+            message: 'Failed to submit entry',
+            error: process.env.NODE_ENV === 'development' ? err.message : 'Internal server error'
+        });
+    } finally {
+        session.endSession();
+    }
+});
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /my
+// ─────────────────────────────────────────────────────────────────────────────
 router.get('/my', authMiddleware, async (req, res) => {
     try {
         const userId = req.user.id;
 
-        // Get all submissions by user with contest data
         const submissions = await Submission.find({ userId })
-            .populate({
-                path: 'contestId',
-                populate: { path: 'rules', select: 'title description' }
-            })
+            .populate({ path: 'contestId', populate: { path: 'rules', select: 'title description' } })
             .populate('fileId', 'thumbnailUrl path')
             .sort({ createdAt: -1 })
             .lean();
 
-        // Group by contest to get unique contests user joined
         const contestMap = new Map();
 
         for (const sub of submissions) {
@@ -784,7 +748,6 @@ router.get('/my', authMiddleware, async (req, res) => {
             if (now >= c.startDate && now <= c.endDate) status = 'active';
             else if (now > c.endDate) status = 'completed';
 
-            // Determine placement
             let placement = 'participant';
             if (sub.status === 'winner') placement = 'winner';
             else if (sub.status === 'shortlisted') placement = 'finalist';
@@ -796,9 +759,9 @@ router.get('/my', authMiddleware, async (req, res) => {
                     subtitle: c.rules?.description || c.description || '',
                     status,
                     myEntries: 0,
-                    placement: 'participant', // Will upgrade if better found
+                    placement: 'participant',
                     endDate: c.endDate,
-                    hasHighlights: status === 'completed', // Winners announced
+                    hasHighlights: status === 'completed',
                     submissions: []
                 });
             }
@@ -812,17 +775,12 @@ router.get('/my', authMiddleware, async (req, res) => {
                 verdict: sub.verdict
             });
 
-            // Upgrade placement if this submission has better status
-            if (placement === 'winner' ||
-                (placement === 'finalist' && entry.placement === 'participant')) {
+            if (placement === 'winner' || (placement === 'finalist' && entry.placement === 'participant')) {
                 entry.placement = placement;
             }
         }
 
-        res.json({
-            success: true,
-            contests: Array.from(contestMap.values())
-        });
+        res.json({ success: true, contests: Array.from(contestMap.values()) });
 
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
@@ -830,6 +788,9 @@ router.get('/my', authMiddleware, async (req, res) => {
 });
 
 
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /:contestId/overview
+// ─────────────────────────────────────────────────────────────────────────────
 router.get('/:contestId/overview', authMiddleware, async (req, res) => {
     try {
         const { contestId } = req.params;
@@ -837,7 +798,6 @@ router.get('/:contestId/overview', authMiddleware, async (req, res) => {
 
         validateObjectId(contestId, 'contestId');
 
-        // ── 1. Fetch contest ──────────────────────────────────────────────
         const contest = await Contest.findById(contestId)
             .populate('rules', 'title description prizeDescription theme')
             .lean();
@@ -846,45 +806,30 @@ router.get('/:contestId/overview', authMiddleware, async (req, res) => {
             return res.status(404).json({ success: false, error: 'Contest not found' });
         }
 
-        // ── 2. User's submissions ─────────────────────────────────────────
         const mySubmissions = await Submission.find({
             contestId: new mongoose.Types.ObjectId(contestId),
             userId: new mongoose.Types.ObjectId(userId),
-        })
-            .sort({ createdAt: -1 })
-            .lean();
+        }).sort({ createdAt: -1 }).lean();
 
-        // ── 3. Resolve thumbnails via 3-tier fallback ─────────────────────
         const resolvedSubmissions = await Promise.all(
             mySubmissions.map(async (sub) => {
                 let thumbnailUrl = sub.thumbnailUrl ?? null;
 
-                // Tier 1 – populate fileId if it's a real FileMeta ObjectId
                 if (!thumbnailUrl && sub.fileId) {
-                    const file = await FileMeta.findById(sub.fileId)
-                        .select('thumbnailUrl path')
-                        .lean();
+                    const file = await FileMeta.findById(sub.fileId).select('thumbnailUrl path').lean();
                     thumbnailUrl = file?.thumbnailUrl ?? file?.path ?? null;
                 }
-
-                // Tier 2 – try metadata.entryId as a FileMeta _id
                 if (!thumbnailUrl && sub.metadata?.entryId) {
-                    const file = await FileMeta.findById(sub.metadata.entryId)
-                        .select('thumbnailUrl path')
-                        .lean();
+                    const file = await FileMeta.findById(sub.metadata.entryId).select('thumbnailUrl path').lean();
                     thumbnailUrl = file?.thumbnailUrl ?? file?.path ?? null;
                 }
-
-                // Tier 3 – fallback: find any FileMeta for this user + contest
                 if (!thumbnailUrl) {
                     const file = await FileMeta.findOne({
                         event: new mongoose.Types.ObjectId(contestId),
                         createdBy: new mongoose.Types.ObjectId(userId),
                         isSubmission: true,
                         archived: false,
-                    })
-                        .select('thumbnailUrl path')
-                        .lean();
+                    }).select('thumbnailUrl path').lean();
                     thumbnailUrl = file?.thumbnailUrl ?? file?.path ?? null;
                 }
 
@@ -896,27 +841,22 @@ router.get('/:contestId/overview', authMiddleware, async (req, res) => {
                     aiScore: sub.aiScore ?? null,
                     submittedAt: sub.submittedAt
                         ? new Date(sub.submittedAt).toISOString()
-                        : sub.createdAt
-                            ? new Date(sub.createdAt).toISOString()
-                            : null,
+                        : sub.createdAt ? new Date(sub.createdAt).toISOString() : null,
                 };
             })
         );
 
-        // ── 4. Total entry count ──────────────────────────────────────────
         const [submissionCount, entryCount] = await Promise.all([
             Submission.countDocuments({ contestId: new mongoose.Types.ObjectId(contestId) }),
             ContestEntry.countDocuments({ contestId: new mongoose.Types.ObjectId(contestId) }),
         ]);
         const totalEntries = Math.max(submissionCount, entryCount);
 
-        // ── 5. Placement ──────────────────────────────────────────────────
         let placement = 'participant';
         let placementPosition = null;
         let judgeDecision = null;
 
         const mySubIds = mySubmissions.map(s => s._id);
-
         const myEntry = await ContestEntry.findOne({
             contestId: new mongoose.Types.ObjectId(contestId),
             userId: new mongoose.Types.ObjectId(userId),
@@ -938,107 +878,33 @@ router.get('/:contestId/overview', authMiddleware, async (req, res) => {
                 placement = judgeDecision.position === 1 ? 'winner' : 'finalist';
                 placementPosition = judgeDecision.position;
             } else {
-                const bestSub = mySubmissions.find(s =>
-                    ['winner', 'shortlisted'].includes(s.status)
-                );
-                if (bestSub) {
-                    placement = bestSub.status === 'winner' ? 'winner' : 'finalist';
-                }
+                const bestSub = mySubmissions.find(s => ['winner', 'shortlisted'].includes(s.status));
+                if (bestSub) placement = bestSub.status === 'winner' ? 'winner' : 'finalist';
             }
         }
 
-        // ── 6. Phase / results visibility ─────────────────────────────────
         const now = new Date();
         const endDate = new Date(contest.endDate);
         const phase3Start = new Date(endDate);
         phase3Start.setDate(phase3Start.getDate() + 3);
-        const resultsVisible = now >= phase3Start;
+        const resultsVisible = now >= endDate; // show results as soon as contest ends
 
-        // ── 🔧 NEW: Fetch top 3 winners (Phase 3 only) ────────────────────
-        let winners = [];
+        // ── Winners — uses the same shared helper ─────────────────────────
+        const winners = await resolveWinners(contestId, now, endDate);
 
-        if (resultsVisible) {
-            const judgeDecisions = await JudgeDecision.find({
-                contestId: new mongoose.Types.ObjectId(contestId),
-                finalDecision: 'winner'
-            })
-                .populate('entryId')
-                .populate('userId', 'name firstName username avatarUrl')
-                .sort({ position: 1 })
-                .limit(3)
-                .lean();
-
-            if (judgeDecisions.length > 0) {
-                for (const decision of judgeDecisions) {
-                    let mediaUrl = null;
-                    let thumbnailUrl = null;
-
-                    // Try to get media from different sources
-                    if (decision.entryId) {
-                        if (decision.entryId.fileId) {
-                            const fileMeta = await FileMeta.findById(decision.entryId.fileId)
-                                .select('path thumbnailUrl')
-                                .lean();
-                            if (fileMeta) {
-                                mediaUrl = fileMeta.path;
-                                thumbnailUrl = fileMeta.thumbnailUrl || fileMeta.path;
-                            }
-                        }
-                        else if (decision.entryId.mediaUrl) {
-                            mediaUrl = decision.entryId.mediaUrl;
-                            thumbnailUrl = decision.entryId.thumbnailUrl || decision.entryId.mediaUrl;
-                        }
-                    }
-
-                    // Fallback: search FileMeta by user + contest
-                    if (!mediaUrl && decision.userId?._id) {
-                        const fallbackFile = await FileMeta.findOne({
-                            event: new mongoose.Types.ObjectId(contestId),
-                            createdBy: decision.userId._id,
-                            isSubmission: true,
-                            archived: false
-                        }).select('path thumbnailUrl').lean();
-
-                        if (fallbackFile) {
-                            mediaUrl = fallbackFile.path;
-                            thumbnailUrl = fallbackFile.thumbnailUrl || fallbackFile.path;
-                        }
-                    }
-
-                    const userData = decision.userId;
-                    winners.push({
-                        position: decision.position,
-                        entryId: decision.entryId?._id?.toString() || null,
-                        userId: decision.userId?._id?.toString() || null,
-                        userName: userData?.name || userData?.firstName || userData?.username || 'Unknown',
-                        userAvatar: userData?.avatarUrl || null,
-                        mediaUrl: mediaUrl,
-                        thumbnailUrl: thumbnailUrl,
-                        aiScore: decision.aiScore || null,
-                        aiRank: decision.aiRank || null,
-                        overrideReason: decision.overrideReason || null,
-                    });
-                }
-            }
-        }
-
-        // ── 7. Highlights (Phase 3 only) ──────────────────────────────────
+        // ── Highlights ────────────────────────────────────────────────────
         let highlights = [];
         if (resultsVisible) {
             const topEntries = await Submission.find({
                 contestId: new mongoose.Types.ObjectId(contestId),
                 status: { $in: ['shortlisted', 'winner', 'approved'] },
-            })
-                .sort({ aiScore: -1, votes: -1 })
-                .limit(10)
-                .lean();
+            }).sort({ aiScore: -1, votes: -1 }).limit(10).lean();
 
             highlights = await Promise.all(
                 topEntries.map(async (e) => {
                     let thumbUrl = e.thumbnailUrl ?? null;
                     if (!thumbUrl && e.fileId) {
-                        const file = await FileMeta.findById(e.fileId)
-                            .select('thumbnailUrl path').lean();
+                        const file = await FileMeta.findById(e.fileId).select('thumbnailUrl path').lean();
                         thumbUrl = file?.thumbnailUrl ?? file?.path ?? null;
                     }
                     return {
@@ -1052,13 +918,11 @@ router.get('/:contestId/overview', authMiddleware, async (req, res) => {
             );
         }
 
-        // ── 8. Timeline ───────────────────────────────────────────────────
         const mySubmissionsSortedAsc = [...mySubmissions].sort(
             (a, b) => new Date(a.createdAt) - new Date(b.createdAt)
         );
         const timeline = buildUserTimeline(mySubmissionsSortedAsc, judgeDecision);
 
-        // ── 9. Response ───────────────────────────────────────────────────
         res.json({
             success: true,
             contest: {
@@ -1068,95 +932,76 @@ router.get('/:contestId/overview', authMiddleware, async (req, res) => {
                 prizeText: contest.rules?.prizeDescription ?? contest.prizeText ?? 'Win curated badge + spotlight',
                 status: getContestStatus(contest, now),
                 theme: contest.rules?.theme ?? null,
-
                 totalEntries,
                 myShots: resolvedSubmissions.length,
                 placement,
                 placementPosition,
-
                 startDate: contest.startDate?.toISOString() ?? null,
                 endDate: contest.endDate?.toISOString() ?? null,
                 phase3Start: phase3Start.toISOString(),
                 resultsVisible,
                 timeLabel: calculateTimeLabel(contest, now),
-
                 mySubmissions: resolvedSubmissions,
                 highlights,
                 timeline,
                 userBadge: userId ? await getUserBadgeInfo(userId) : null,
-                winners: winners,
+                winners,
                 winnersAnnounced: winners.length > 0,
             },
         });
+
     } catch (error) {
         console.error('Get contest overview error:', error);
         res.status(500).json({ success: false, error: error.message });
     }
 });
 
-// ─── Helper: validate MongoDB ObjectId ───────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────────────────────────────────────
 function validateObjectId(id, fieldName = 'id') {
     if (!mongoose.Types.ObjectId.isValid(id)) {
         throw new Error(`Invalid ${fieldName}: must be a valid MongoDB ObjectId`);
     }
 }
 
-// ─── Helper: derive contest phase label ──────────────────────────────────────
 function getContestStatus(contest, now) {
     if (now < new Date(contest.startDate)) return 'upcoming';
     if (now <= new Date(contest.endDate)) return 'active';
     return 'completed';
 }
 
-// ─── Helper: human-readable time label ───────────────────────────────────────
 function calculateTimeLabel(contest, now) {
     const end = new Date(contest.endDate);
     const diff = end - now;
-
     if (diff > 0) {
         const days = Math.ceil(diff / (1000 * 60 * 60 * 24));
         return days === 1 ? 'Ends tomorrow' : `${days} days left`;
     }
-
     const phase3 = new Date(end);
     phase3.setDate(phase3.getDate() + 2);
     const resultsDiff = phase3 - now;
-
     if (resultsDiff > 0) {
         const hours = Math.ceil(resultsDiff / (1000 * 60 * 60));
         return `Results in ${hours}h`;
     }
-
     return 'Results announced';
 }
 
-// ─── Helper: build per-user journey timeline ─────────────────────────────────
-/**
- * @param {Array}  submissions  – sorted ascending by createdAt
- * @param {Object} judgeDecision – JudgeDecision doc or null
- * @returns {Array<TimelineItem>}
- */
 function buildUserTimeline(submissions, judgeDecision) {
     const timeline = [];
-
     if (submissions.length === 0) return timeline;
 
-    // Step 1 – Joined
     timeline.push({
         step: 'joined',
         label: 'Joined contest',
-        description: `You added your first shot on ${new Date(
-            submissions[0].createdAt
-        ).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`,
+        description: `You added your first shot on ${new Date(submissions[0].createdAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`,
         completed: true,
-        // Return ISO string so Dart can parse it with DateTime.tryParse()
         timestamp: new Date(submissions[0].createdAt).toISOString(),
     });
 
-    // Step 2 – Shortlisted
-    const shortlisted = submissions.filter(
-        (s) => s.status === 'shortlisted' || s.status === 'winner'
-    );
+    const shortlisted = submissions.filter(s => s.status === 'shortlisted' || s.status === 'winner');
     if (shortlisted.length > 0) {
         timeline.push({
             step: 'shortlisted',
@@ -1167,19 +1012,15 @@ function buildUserTimeline(submissions, judgeDecision) {
         });
     }
 
-    // Step 3 – Results
     if (judgeDecision) {
         timeline.push({
             step: 'results',
             label: judgeDecision.position === 1 ? 'You won!' : 'Finalist placement',
-            description:
-                judgeDecision.position === 1
-                    ? 'Congratulations! You won this contest'
-                    : `You placed #${judgeDecision.position} in this contest`,
+            description: judgeDecision.position === 1
+                ? 'Congratulations! You won this contest'
+                : `You placed #${judgeDecision.position} in this contest`,
             completed: true,
-            timestamp: judgeDecision.selectedAt
-                ? new Date(judgeDecision.selectedAt).toISOString()
-                : null,
+            timestamp: judgeDecision.selectedAt ? new Date(judgeDecision.selectedAt).toISOString() : null,
         });
     } else {
         timeline.push({

@@ -476,7 +476,7 @@ router.put('/me', auth, async (req, res) => {
         if (dateOfBirth !== undefined) updateFields.dateOfBirth = new Date(dateOfBirth);
         if (gender !== undefined) updateFields.gender = gender;
 
-        if (firstName || avatarUrl || bio || dateOfBirth || gender) {
+        if (Object.keys(updateFields).length > 0) {
             updateFields.isProfileCompleted = true;
         }
         // Build location update if any location field is provided

@@ -8,158 +8,188 @@ const router = express.Router();
 
 /**
  * POST /api/reports
- * Submit a report for a file
- * @body { fileId: string, reason: string }
- * @auth Required
+ * Atomically submits a report. Safe against rapid taps and race conditions.
  */
 router.post('/', auth, async (req, res) => {
+    const session = await mongoose.startSession();
+
     try {
-        const userId = req.user.id;
+        const userId = req.user?.id;
+        if (!userId) {
+            return res.status(401).json({ success: false, message: 'Not authenticated' });
+        }
+
         const { fileId, reason } = req.body;
 
-        // Validate inputs
         if (!fileId || !mongoose.Types.ObjectId.isValid(fileId)) {
-            return res.status(400).json({
-                success: false,
-                message: 'Invalid fileId'
-            });
+            return res.status(400).json({ success: false, message: 'Invalid fileId' });
         }
 
         if (!reason || reason.trim().length < 3) {
             return res.status(400).json({
                 success: false,
-                message: 'Please provide a valid reason (min 3 chars)'
+                message: 'Please provide a valid reason (min 3 chars)',
             });
         }
 
-        // Verify file exists and is accessible
-        const file = await FileMeta.findById(fileId).select('createdBy visibility archived');
+        const fileObjectId = new mongoose.Types.ObjectId(fileId);
+        const userObjectId = new mongoose.Types.ObjectId(userId);
+
+        // Quick pre-check outside transaction to give fast feedback on duplicates
+        const alreadyReported = await Report.exists({
+            fileId: fileObjectId,
+            reportedBy: userObjectId,
+        });
+
+        if (alreadyReported) {
+            return res.status(400).json({
+                success: false,
+                message: 'You already reported this photo',
+                reported: true,
+            });
+        }
+
+        // Verify file exists and is reportable
+        const file = await FileMeta.findById(fileObjectId)
+            .select('createdBy visibility archived')
+            .lean();
 
         if (!file || file.archived) {
-            return res.status(404).json({
-                success: false,
-                message: 'Photo not found'
-            });
+            return res.status(404).json({ success: false, message: 'Photo not found' });
         }
 
-        // Can't report private files unless you're the owner (but you can't report yourself)
-        if (file.visibility === 'private' && file.createdBy.toString() !== userId) {
-            return res.status(403).json({
-                success: false,
-                message: 'Cannot report private content'
-            });
-        }
-
-        // Prevent self-reporting
         if (file.createdBy.toString() === userId) {
             return res.status(400).json({
                 success: false,
                 message: 'You cannot report your own content',
-                reported: false
+                reported: false,
             });
         }
 
-        // Prevent duplicate reports
-        const existingReport = await Report.findOne({ fileId, reportedBy: userId });
-
-        if (existingReport) {
-            return res.status(400).json({
+        if (file.visibility === 'private' && file.createdBy.toString() !== userId) {
+            return res.status(403).json({
                 success: false,
-                message: 'You already reported this photo',
-                reported: true // Tell frontend it's already reported
+                message: 'Cannot report private content',
             });
         }
 
-        // Create report
-        await Report.create({
-            fileId,
-            reportedBy: userId,
-            reason: reason.trim(),
-            status: 'pending'
+        // Atomically insert report + increment counter
+        await session.withTransaction(async () => {
+            // upsert — safe no-op if a concurrent request already inserted
+            const result = await Report.updateOne(
+                { fileId: fileObjectId, reportedBy: userObjectId },
+                {
+                    $setOnInsert: {
+                        fileId: fileObjectId,
+                        reportedBy: userObjectId,
+                        reason: reason.trim(),
+                        status: 'pending',
+                    },
+                },
+                { upsert: true, session }
+            );
+
+            if (result.upsertedCount > 0) {
+                await FileMeta.findByIdAndUpdate(
+                    fileObjectId,
+                    { $inc: { reportsCount: 1 } },
+                    { session }
+                );
+            }
         });
 
-        // Increment reports count on file (for admin monitoring)
-        await FileMeta.findByIdAndUpdate(fileId, {
-            $inc: { reportsCount: 1 }
-        });
-
-        res.json({
+        return res.json({
             success: true,
             message: 'Report submitted successfully',
-            reported: true
+            reported: true,
         });
 
-    } catch (error) {
-        console.error('REPORT_ERROR:', error);
-
-        // Handle duplicate key errors (race condition)
-        if (error.code === 11000) {
+    } catch (err) {
+        if (err.code === 11000) {
             return res.status(400).json({
                 success: false,
                 message: 'You already reported this photo',
-                reported: true
+                reported: true,
             });
         }
-
-        res.status(500).json({
+        console.error('REPORT_ERROR:', err);
+        return res.status(500).json({
             success: false,
             message: 'Failed to submit report',
-            reported: false
+            reported: false,
         });
+    } finally {
+        session.endSession();
     }
 });
 
 /**
- * GET /api/reports/status/:fileId
- * Check if user has reported this file
- * @auth Required
+ * POST /api/reports/status-batch
+ * Check report status for multiple files in one call.
+ * Call this when loading a feed page so the flag icon reflects reality.
+ */
+router.post('/status-batch', auth, async (req, res) => {
+    try {
+        const userId = req.user?.id;
+        const { fileIds } = req.body;
+
+        if (!Array.isArray(fileIds) || fileIds.length === 0) {
+            return res.status(400).json({ success: false, message: 'fileIds must be a non-empty array' });
+        }
+
+        const validIds = fileIds.filter(id => mongoose.Types.ObjectId.isValid(id));
+
+        const reports = await Report.find({
+            fileId: { $in: validIds.map(id => new mongoose.Types.ObjectId(id)) },
+            reportedBy: new mongoose.Types.ObjectId(userId),
+        }).select('fileId').lean();
+
+        const reportedSet = new Set(reports.map(r => r.fileId.toString()));
+
+        const statusMap = {};
+        validIds.forEach(id => {
+            statusMap[id] = reportedSet.has(id);
+        });
+
+        return res.json({ success: true, data: statusMap });
+
+    } catch (err) {
+        console.error('REPORT_STATUS_BATCH_ERROR:', err);
+        return res.status(500).json({ success: false, message: 'Failed to check report status' });
+    }
+});
+
+/**
+ * GET /api/reports/status/:fileId  — single file check (unchanged)
  */
 router.get('/status/:fileId', auth, async (req, res) => {
     try {
-        const userId = req.user.id;
         const { fileId } = req.params;
-
         if (!mongoose.Types.ObjectId.isValid(fileId)) {
-            return res.status(400).json({
-                success: false,
-                message: 'Invalid fileId'
-            });
+            return res.status(400).json({ success: false, message: 'Invalid fileId' });
         }
-
-        const existingReport = await Report.findOne({ fileId, reportedBy: userId });
-
-        res.json({
-            success: true,
-            reported: !!existingReport
+        const exists = await Report.exists({
+            fileId: new mongoose.Types.ObjectId(fileId),
+            reportedBy: new mongoose.Types.ObjectId(req.user.id),
         });
-
-    } catch (error) {
-        console.error('REPORT_STATUS_ERROR:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to check report status'
-        });
+        return res.json({ success: true, reported: !!exists });
+    } catch (err) {
+        console.error('REPORT_STATUS_ERROR:', err);
+        return res.status(500).json({ success: false, message: 'Failed to check report status' });
     }
 });
 
 /**
- * GET /api/reports/my
- * Get all reports submitted by current user
- * @auth Required
+ * GET /api/reports/my  — unchanged
  */
 router.get('/my', auth, async (req, res) => {
     try {
-        const userId = req.user.id;
         const { page = 1, limit = 20 } = req.query;
-
-        const reports = await Report.find({ reportedBy: userId })
+        const reports = await Report.find({ reportedBy: req.user.id })
             .sort({ createdAt: -1 })
             .skip((page - 1) * limit)
             .limit(parseInt(limit))
-            .populate({
-                path: 'fileId',
-                select: '_id path thumbnailPath title'
-            });
+            .populate({ path: 'fileId', select: '_id path thumbnailPath title' });
 
         const formatted = reports.map(r => ({
             id: r._id.toString(),
@@ -168,25 +198,21 @@ router.get('/my', auth, async (req, res) => {
             fileTitle: r.fileId?.title || 'Untitled',
             reason: r.reason,
             status: r.status,
-            createdAt: r.createdAt
+            createdAt: r.createdAt,
         }));
 
-        res.json({
+        return res.json({
             success: true,
             data: formatted,
             pagination: {
                 page: parseInt(page),
                 limit: parseInt(limit),
-                total: await Report.countDocuments({ reportedBy: userId })
-            }
+                total: await Report.countDocuments({ reportedBy: req.user.id }),
+            },
         });
-
-    } catch (error) {
-        console.error('GET_MY_REPORTS_ERROR:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to fetch reports'
-        });
+    } catch (err) {
+        console.error('GET_MY_REPORTS_ERROR:', err);
+        return res.status(500).json({ success: false, message: 'Failed to fetch reports' });
     }
 });
 

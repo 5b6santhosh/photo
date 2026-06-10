@@ -367,7 +367,31 @@ router.post('/:contestId/select-winners',
                         );
                     }
 
-                    return { ...sel, userId: entry.userId };
+                    // const submission = await Submission.findById(sel.entryId)
+                    //     .select('userId contestId')
+                    //     .lean();
+
+                    // if (!submission) {
+                    //     throw new Error(`Submission not found for entryId: ${sel.entryId}`);
+                    // }
+
+                    // const contestEntry = await ContestEntry.findOne({
+                    //     userId: submission.userId,
+                    //     contestId: new mongoose.Types.ObjectId(contestId)
+                    // }).select('_id').lean();
+
+                    // if (!contestEntry) {
+                    //     throw new Error(`ContestEntry not found for user ${submission.userId} in contest ${contestId}`);
+                    // }
+
+                    return { ...sel, userId: entry.userId, submissionId: entry._id.toString() };
+                    // return {
+                    //     ...sel,
+                    //     userId: submission.userId,
+                    //     entryId: contestEntry._id.toString(),  
+                    //     aiScore: submission.aiScore || null, 
+                    //     aiRank: submission.aiRank || null     
+                    // };
                 })
             );
 
@@ -396,8 +420,8 @@ router.post('/:contestId/select-winners',
             res.json({
                 success: true,
                 message: 'Winners selected successfully',
-                contestId: contestId,                         
-                processedCount: result.processedCount,         
+                contestId: contestId,
+                processedCount: result.processedCount,
                 winners: result.winners
             });
 
@@ -666,7 +690,7 @@ router.post('/evaluate',
                 }
 
                 // Also create Submission record
-                await Submission.findOneAndUpdate(
+                const submission = await Submission.findOneAndUpdate(
                     { userId, contestId },
                     {
                         $set: {
@@ -690,6 +714,13 @@ router.post('/evaluate',
                     },
                     { upsert: true, new: true }
                 );
+                if (savedEntry && submission) {
+                    await ContestEntry.findByIdAndUpdate(savedEntry._id, {
+                        $set: {
+                            'metadata.submissionId': submission._id.toString()
+                        }
+                    });
+                }
             }
 
             res.json({

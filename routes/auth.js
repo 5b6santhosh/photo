@@ -9,6 +9,11 @@ const { authMiddleware, requireAdmin } = require('../middleware/auth');
 const TokenBlacklist = require('../models/TokenBlacklist');
 const { checkAndUpgradeBadge } = require('../utils/badgeUtils');
 const PasswordReset = require('../models/PasswordReset');
+const Like = require('../models/Like');
+const Favorite = require('../models/Favorite');
+const Following = require('../models/Following');
+const Report = require('../models/Report');
+const FileMeta = require('../models/FileMeta');
 
 const router = express.Router();
 
@@ -431,62 +436,147 @@ router.post('/logout', authMiddleware, async (req, res) => {
 
 /**
  * DELETE /api/auth/delete-account
- * Delete user account with password confirmation
+ * Atomically deletes user + ALL related data with password confirmation.
  */
 router.delete('/delete-account', authMiddleware, async (req, res) => {
+  const session = await mongoose.startSession();
+
   try {
     const userId = req.user.id;
     const token = req.token;
-    const { password } = req.body; // Require password confirmation
+    const { password } = req.body;
 
-    // Validate password confirmation
     if (!password) {
       return res.status(400).json({
         success: false,
-        message: "Password confirmation required"
+        message: 'Password confirmation required',
       });
     }
 
-    const user = await User.findById(userId);
+    const userObjectId = new mongoose.Types.ObjectId(userId);
+
+    // Verify user + password BEFORE starting the transaction
+    const user = await User.findById(userObjectId).select('password').lean();
     if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: "User not found"
-      });
+      return res.status(404).json({ success: false, message: 'User not found' });
     }
 
-    // Verify password before deletion
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) {
-      return res.status(401).json({
-        success: false,
-        message: "Invalid password"
-      });
+      return res.status(401).json({ success: false, message: 'Invalid password' });
     }
 
-    // Delete user
-    await User.deleteOne({ _id: userId });
-
-    // Blacklist token (force logout)
+    // Blacklist token FIRST so the token is dead even if cleanup partially fails
     const decoded = jwt.decode(token);
-    if (decoded && decoded.exp) {
-      await TokenBlacklist.create({
-        token,
-        expiresAt: new Date(decoded.exp * 1000)
-      });
+    if (decoded?.exp) {
+      await TokenBlacklist.updateOne(
+        { token },
+        { $setOnInsert: { token, expiresAt: new Date(decoded.exp * 1000) } },
+        { upsert: true }
+      );
     }
 
-    res.status(200).json({
+    // All deletes inside a single transaction — either all succeed or all roll back
+    await session.withTransaction(async () => {
+
+      // 1. Get all files owned by this user (needed for cascade)
+      const userFileIds = await FileMeta.find(
+        { createdBy: userObjectId },
+        { _id: 1 }
+      ).session(session).lean();
+      const fileObjectIds = userFileIds.map(f => f._id);
+
+      // 2. Delete all likes ON the user's files (others liked their photos)
+      if (fileObjectIds.length > 0) {
+        await Like.deleteMany(
+          { fileId: { $in: fileObjectIds } },
+          { session }
+        );
+      }
+
+      // 3. Delete all likes MADE by this user (photos they liked)
+      await Like.deleteMany({ userId: userObjectId }, { session });
+
+      // 4. Delete all favorites ON the user's files
+      if (fileObjectIds.length > 0) {
+        await Favorite.deleteMany(
+          { fileId: { $in: fileObjectIds } },
+          { session }
+        );
+      }
+
+      // 5. Delete all favorites MADE by this user
+      await Favorite.deleteMany({ userId: userObjectId }, { session });
+
+      // 6. Delete all reports ON the user's files
+      if (fileObjectIds.length > 0) {
+        await Report.deleteMany(
+          { fileId: { $in: fileObjectIds } },
+          { session }
+        );
+      }
+
+      // 7. Delete all reports MADE by this user
+      await Report.deleteMany({ reportedBy: userObjectId }, { session });
+
+      // 8. Decrement followersCount for everyone this user was following
+      //    (they were counting this user as a follower)
+      const followingList = await Following.find(
+        { follower: userObjectId },
+        { following: 1 }
+      ).session(session).lean();
+
+      if (followingList.length > 0) {
+        const followingIds = followingList.map(f => f.following);
+        await User.updateMany(
+          { _id: { $in: followingIds } },
+          [{ $set: { followersCount: { $max: [0, { $subtract: ['$followersCount', 1] }] } } }],
+          { session }
+        );
+      }
+
+      // 9. Decrement followingCount for everyone who was following this user
+      //    (they were counting this user as someone they follow)
+      const followerList = await Following.find(
+        { following: userObjectId },
+        { follower: 1 }
+      ).session(session).lean();
+
+      if (followerList.length > 0) {
+        const followerIds = followerList.map(f => f.follower);
+        await User.updateMany(
+          { _id: { $in: followerIds } },
+          [{ $set: { followingCount: { $max: [0, { $subtract: ['$followingCount', 1] }] } } }],
+          { session }
+        );
+      }
+
+      // 10. Delete all follow relationships involving this user
+      await Following.deleteMany(
+        { $or: [{ follower: userObjectId }, { following: userObjectId }] },
+        { session }
+      );
+
+      // 11. Delete all the user's files (FileMeta)
+      await FileMeta.deleteMany({ createdBy: userObjectId }, { session });
+
+      // 12. Delete the user document itself
+      await User.deleteOne({ _id: userObjectId }, { session });
+    });
+
+    return res.status(200).json({
       success: true,
-      message: "Account deleted successfully"
+      message: 'Account and all associated data deleted successfully',
     });
 
   } catch (err) {
-    console.error("Delete account error:", err);
-    res.status(500).json({
+    console.error('DELETE_ACCOUNT_ERROR:', err);
+    return res.status(500).json({
       success: false,
-      message: "Failed to delete account"
+      message: 'Failed to delete account. Please try again.',
     });
+  } finally {
+    session.endSession();
   }
 });
 

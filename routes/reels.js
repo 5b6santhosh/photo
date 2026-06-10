@@ -407,7 +407,7 @@ router.get('/feed/swipe', async (req, res) => {
             {
                 $lookup: {
                     from: 'users',
-                    localField: 'createdBy',   // still the raw ObjectId at this point
+                    localField: 'createdBy',
                     foreignField: '_id',
                     as: 'userInfo',
                     pipeline: [
@@ -417,9 +417,17 @@ router.get('/feed/swipe', async (req, res) => {
                                 username: 1,
                                 firstName: 1,
                                 lastName: 1,
-                                name: 1,
+                                email: 1,
                                 avatarUrl: 1,
-                                wins: 1
+                                bio: 1,
+                                dateOfBirth: 1,
+                                gender: 1,
+                                wins: 1,
+                                streakDays: 1,
+                                location: 1,
+                                isProfileCompleted: 1,
+                                badgeTier: 1,        // ← if you have badge logic
+                                // badge: 1,         // ← if you have a nested badge object
                             }
                         }
                     ]
@@ -559,25 +567,33 @@ function formatReel(f, safeUserId, likedSet, bookmarkedSet, followingSet, now) {
             imageUrl: isVideo ? (f.thumbnailUrl || f.path) : f.path,
         },
         videoUrl: isVideo ? f.path : null,
-
-        // FIX: eventTitle/eventStatus only non-default when event is actually linked in FileMeta
         eventTitle: event?.title || 'General',
         eventStatus,
         isMyEvent,
         isFromFollowing,
-
         likes: f.likesCount || 0,
         comments: f.commentsCount || 0,
-
-        // FIX: Cast _id to string before Set.has() — aggregate returns BSON ObjectIds
         isLiked: likedSet.has(f._id.toString()),
         isBookmarked: bookmarkedSet.has(f._id.toString()),
-
+        sharesCount: f.sharesCount || 0,
+        visibility: f.visibility || 'public',
+        isSubmission: f.isSubmission || false,
         user: {
             id: creatorIdStr,
+            login: user?.username || '',
             name: displayName,
+            firstName: user?.firstName || '',
+            email: user?.email || '',
+            bio: user?.bio || '',
             avatarUrl: user?.avatarUrl || '',
+            dateOfBirth: user?.dateOfBirth || null,
+            gender: user?.gender || '',
             wins: user?.wins || 0,
+            streakDays: user?.streakDays || 0,
+            location: user?.location || null,
+            isProfileCompleted: user?.isProfileCompleted ?? false,
+            badge: user?.badge || null,
+            totalPhotos: 0,
         },
     };
 }

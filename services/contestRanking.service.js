@@ -384,6 +384,7 @@ async function getAdminPreview({ contestId, adminId }) {
                     technicalQuality: entry.scores.technical,
                     engagement: entry.scores.engagement,
                 },
+                preliminaryRank: entry.preliminaryRank,
                 judgeStatus: sub?.status ?? 'pending',
                 isSelected: !!decisionMap[entry.entryId.toString()],
                 selectionDetails: decisionMap[entry.entryId.toString()] ?? null,
@@ -436,25 +437,71 @@ async function getPublicWinners({ contestId, limit = 10 }) {
         contestId,
         finalDecision: 'winner'
     })
-        .populate('entryId', 'title mediaUrl thumbnailUrl')
-        .populate('userId', 'name email avatarUrl')
+        .populate('entryId')
+        .populate('userId', 'name firstName username email avatarUrl')
         .sort({ position: 1 })
         .limit(limit)
         .lean();
 
+    // if (judgeWinners.length > 0) {
+    //     return {
+    //         phase: 3,
+    //         visible: true,
+    //         source: 'judge',
+    //         winners: judgeWinners.map(w => ({
+    //             rank: w.position,
+    //             entryId: w.entryId,
+    //             userId: w.userId,
+    //             aiScore: w.aiScore,
+    //             aiRank: w.aiRank,
+    //             overrideReason: w.overrideReason
+    //         }))
+    //     };
+    // }
+
     if (judgeWinners.length > 0) {
+        const FileMeta = require('../models/FileMeta');
+
+        const populatedWinners = await Promise.all(
+            judgeWinners.map(async (w) => {
+                let mediaUrl = null;
+                let thumbnailUrl = null;
+
+                if (w.entryId?.fileId) {
+                    const file = await FileMeta.findById(w.entryId.fileId)
+                        .select('path thumbnailUrl')
+                        .lean();
+                    if (file) {
+                        mediaUrl = file.path;
+                        thumbnailUrl = file.thumbnailUrl || file.path;
+                    }
+                }
+
+                if (!mediaUrl && w.entryId) {
+                    mediaUrl = w.entryId.mediaUrl;
+                    thumbnailUrl = w.entryId.thumbnailUrl || w.entryId.mediaUrl;
+                }
+
+                return {
+                    rank: w.position,
+                    entryId: w.entryId?._id?.toString() || null,
+                    userId: w.userId?._id?.toString() || null,
+                    userName: w.userId?.name || w.userId?.firstName || w.userId?.username || 'Unknown',
+                    userAvatar: w.userId?.avatarUrl || null,
+                    mediaUrl: mediaUrl,
+                    thumbnailUrl: thumbnailUrl,
+                    aiScore: w.aiScore,
+                    aiRank: w.aiRank,
+                    overrideReason: w.overrideReason,
+                };
+            })
+        );
+
         return {
             phase: 3,
             visible: true,
             source: 'judge',
-            winners: judgeWinners.map(w => ({
-                rank: w.position,
-                entryId: w.entryId,
-                userId: w.userId,
-                aiScore: w.aiScore,
-                aiRank: w.aiRank,
-                overrideReason: w.overrideReason
-            }))
+            winners: populatedWinners
         };
     }
 
@@ -482,31 +529,6 @@ async function getPublicWinners({ contestId, limit = 10 }) {
 // SELECT WINNERS  (Phase 2 — admin action)
 // ============================================
 
-// async function selectWinners({ contestId, selections, adminId }) {
-//     // Clear any previous selections for this contest
-//     await JudgeDecision.deleteMany({ contestId });
-
-//     const decisions = selections.map((sel, idx) => ({
-//         contestId,
-//         entryId: sel.entryId,
-//         userId: sel.userId,
-//         judgeId: adminId,
-//         aiScore: sel.scores?.final ?? sel.aiScore ?? null,
-//         aiRank: sel.preliminaryRank ?? null,
-//         finalDecision: 'winner',
-//         position: sel.position || idx + 1,
-//         overrideReason: sel.overrideReason ?? null,
-//         selectedAt: new Date()
-//     }));
-
-//     await JudgeDecision.insertMany(decisions);
-//     return { success: true, count: decisions.length };
-// }
-
-// ============================================
-// SELECT WINNERS  (Phase 2 — admin action)
-// ============================================
-
 async function selectWinners({ contestId, selections, adminId }) {
     // Clear any previous selections for this contest
     await JudgeDecision.deleteMany({ contestId });
@@ -522,7 +544,7 @@ async function selectWinners({ contestId, selections, adminId }) {
         let userId = sel.userId;
         if (!userId) {
             const submission = await Submission.findById(sel.entryId)
-                .select('userId')
+                .select('userId aiScore')
                 .lean();
             if (submission) {
                 userId = submission.userId?.toString();
@@ -534,8 +556,8 @@ async function selectWinners({ contestId, selections, adminId }) {
             entryId: sel.entryId,
             userId: userId,
             judgeId: adminId,
-            aiScore: sel.scores?.final ?? sel.aiScore ?? null,
-            aiRank: sel.preliminaryRank ?? null,
+            aiScore: sel.scores?.aiFinal ?? sel.aiScore ?? null,
+            aiRank: sel.preliminaryRank ?? sel.rank ?? null,
             finalDecision: 'winner',
             position: sel.position || (decisions.length + 1),
             overrideReason: sel.overrideReason ?? null,
