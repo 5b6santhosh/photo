@@ -39,39 +39,37 @@ async function resolveWinners(contestId, now, endDate) {
         const entryObjectId = decision.entryId;
         let mediaUrl = null;
         let thumbnailUrl = null;
-
         let resolvedUserData = decision.userId || null;
         let resolvedUserId = decision.userId?._id?.toString() || null;
 
         // ── TIER 1: Try Submission model ──────────────────────────────────
+        let subDoc = null;
         if (entryObjectId) {
-            const sub = await Submission.findById(entryObjectId)
-                .select('fileId mediaUrl thumbnailUrl userId')
+            subDoc = await Submission.findById(entryObjectId)
+                .select('fileId mediaUrl thumbnailUrl userId aiScore')
                 .lean();
 
-            if (sub) {
-                // Get media from Submission → FileMeta
-                if (sub.fileId) {
-                    const fileMeta = await FileMeta.findById(sub.fileId)
+            if (subDoc) {
+                if (subDoc.fileId) {
+                    const fileMeta = await FileMeta.findById(subDoc.fileId)
                         .select('path thumbnailUrl')
                         .lean();
                     if (fileMeta) {
                         mediaUrl = fileMeta.path;
                         thumbnailUrl = fileMeta.thumbnailUrl || fileMeta.path;
                     }
-                } else if (sub.mediaUrl) {
-                    mediaUrl = sub.mediaUrl;
-                    thumbnailUrl = sub.thumbnailUrl || sub.mediaUrl;
+                } else if (subDoc.mediaUrl) {
+                    mediaUrl = subDoc.mediaUrl;
+                    thumbnailUrl = subDoc.thumbnailUrl || subDoc.mediaUrl;
                 }
 
-                if (!resolvedUserId && sub.userId) {
-                    resolvedUserId = sub.userId.toString();
+                if (!resolvedUserId && subDoc.userId) {
+                    resolvedUserId = subDoc.userId.toString();
                 }
             }
         }
 
         // ── TIER 2: Try ContestEntry model ────────────────────────────────
-        // (entryId was saved as ContestEntry._id in many cases)
         if (entryObjectId && (!mediaUrl || !resolvedUserId)) {
             const ce = await ContestEntry.findById(entryObjectId)
                 .select('photos videos userId')
@@ -90,40 +88,58 @@ async function resolveWinners(contestId, now, endDate) {
                         }
                     }
                 }
-
                 if (!resolvedUserId && ce.userId) {
                     resolvedUserId = ce.userId.toString();
                 }
             }
         }
 
-        // ── Resolve user name/avatar if populate returned null ────────────
-        // This happens when JudgeDecision.userId was null in the DB.
-        // resolvedUserId may now be populated from Submission or ContestEntry above.
-        // if (!resolvedUserData && resolvedUserId) {
-        //     resolvedUserData = await User.findById(resolvedUserId)
-        //         .select('name firstName username avatarUrl')
-        //         .lean();
-        // }
-
+        // ── TIER 3: Fallback user lookup when JudgeDecision.userId was null ──
+        // resolvedUserId may now be populated from Submission or ContestEntry above
         if (!resolvedUserData && resolvedUserId) {
             try {
-                // Try the User model — adjust the path if needed for your project
-                const UserModel = require('../models/User');
-                resolvedUserData = await UserModel.findById(resolvedUserId)
+                resolvedUserData = await User.findById(resolvedUserId)
                     .select('name firstName lastName username email avatarUrl profileImage avatar photo')
                     .lean();
-
-                // DEBUG: uncomment this line if userName is still "Unknown"
-                // console.log(`[resolveWinners] userId=${resolvedUserId} userDoc=`, JSON.stringify(resolvedUserData));
             } catch (e) {
                 console.warn('[resolveWinners] User model lookup failed:', e.message);
             }
         }
 
-        // ── TIER 3: FileMeta fallback by userId + contestId ───────────────
-        // NOTE: This now uses resolvedUserId (not decision.userId?._id)
-        // so it runs even when JudgeDecision.userId was null.
+        // ── TIER 4: If still no userId, try Submission by userId+contestId ──
+        if (!resolvedUserId) {
+            // Try to find any submission for this contest entry via contestId match
+            const fallbackSub = await Submission.findOne({
+                contestId: new mongoose.Types.ObjectId(contestId),
+                status: { $in: ['winner', 'shortlisted', 'submitted', 'approved'] }
+            })
+                .select('userId fileId mediaUrl thumbnailUrl aiScore')
+                .lean();
+
+            if (fallbackSub) {
+                resolvedUserId = fallbackSub.userId?.toString() || null;
+                if (!subDoc) subDoc = fallbackSub;
+
+                if (!mediaUrl) {
+                    if (fallbackSub.fileId) {
+                        const f = await FileMeta.findById(fallbackSub.fileId)
+                            .select('path thumbnailUrl').lean();
+                        if (f) { mediaUrl = f.path; thumbnailUrl = f.thumbnailUrl || f.path; }
+                    } else if (fallbackSub.mediaUrl) {
+                        mediaUrl = fallbackSub.mediaUrl;
+                        thumbnailUrl = fallbackSub.thumbnailUrl || fallbackSub.mediaUrl;
+                    }
+                }
+
+                if (!resolvedUserData && resolvedUserId) {
+                    resolvedUserData = await User.findById(resolvedUserId)
+                        .select('name firstName lastName username email avatarUrl profileImage avatar photo')
+                        .lean();
+                }
+            }
+        }
+
+        // ── TIER 5: FileMeta fallback by userId + contestId ───────────────
         if (!mediaUrl && resolvedUserId) {
             const fallbackFile = await FileMeta.findOne({
                 event: new mongoose.Types.ObjectId(contestId),
@@ -142,9 +158,8 @@ async function resolveWinners(contestId, now, endDate) {
             }
         }
 
-        // ── TIER 4: Last resort — any FileMeta for this contest entry ─────
-        // No userId filter — just find the FileMeta that matches the entryId
-        if (!mediaUrl && entryObjectId) {
+        // ── TIER 6: Last resort — any FileMeta for this contest ───────────
+        if (!mediaUrl) {
             const lastResort = await FileMeta.findOne({
                 event: new mongoose.Types.ObjectId(contestId),
                 isSubmission: true,
@@ -156,17 +171,61 @@ async function resolveWinners(contestId, now, endDate) {
             if (lastResort) {
                 mediaUrl = lastResort.path;
                 thumbnailUrl = lastResort.thumbnailUrl || lastResort.path;
-                // Also recover userId from FileMeta if nothing else worked
                 if (!resolvedUserId && lastResort.createdBy) {
                     resolvedUserId = lastResort.createdBy.toString();
                     if (!resolvedUserData) {
                         resolvedUserData = await User.findById(resolvedUserId)
-                            .select('name firstName username avatarUrl')
+                            .select('name firstName lastName username email avatarUrl profileImage avatar photo')
                             .lean();
                     }
                 }
             }
         }
+
+        // ── Resolve aiScore ───────────────────────────────────────────────
+        // JudgeDecision.aiScore may be null if selectWinners didn't receive score data.
+        // Backfill from Submission → MLFeatureLog in that case.
+        let aiScore = decision.aiScore;
+
+        if (aiScore === null || aiScore === undefined) {
+            if (subDoc?.aiScore != null) {
+                aiScore = subDoc.aiScore;
+            } else if (resolvedUserId || entryObjectId) {
+                try {
+                    const MLFeatureLog = require('../models/MLFeatureLog');
+                    const orClauses = [];
+                    if (entryObjectId) orClauses.push({ entryId: entryObjectId });
+                    if (resolvedUserId) orClauses.push({
+                        contestId: new mongoose.Types.ObjectId(contestId),
+                        userId: new mongoose.Types.ObjectId(resolvedUserId)
+                    });
+
+                    const mlLog = await MLFeatureLog.findOne({ $or: orClauses })
+                        .select('scores aiSignals')
+                        .lean();
+
+                    if (mlLog) {
+                        aiScore = mlLog.scores?.finalScore
+                            ?? mlLog.scores?.quality
+                            ?? mlLog.aiSignals?.perceptualQuality
+                            ?? null;
+                    }
+                } catch (e) {
+                    console.warn('[resolveWinners] MLFeatureLog lookup failed:', e.message);
+                }
+            }
+        }
+
+        // ── Resolve aiRank ────────────────────────────────────────────────
+        // aiRank was never saved by selectWinners (the admin panel doesn't send it).
+        // Use JudgeDecision.position as the canonical rank — it IS the judge's rank.
+        // Only fall back to null if position is also missing (shouldn't happen).
+        const aiRank = decision.aiRank ?? decision.position ?? null;
+
+        // ── overrideReason ────────────────────────────────────────────────
+        // null is correct when the judge did not override the AI ranking.
+        // Return empty string instead so Flutter doesn't need a null-check.
+        const overrideReason = decision.overrideReason ?? null;
 
         winners.push({
             position: decision.position,
@@ -176,12 +235,16 @@ async function resolveWinners(contestId, now, endDate) {
                 || resolvedUserData?.firstName
                 || resolvedUserData?.username
                 || 'Unknown',
-            userAvatar: resolvedUserData?.avatarUrl || null,
+            userAvatar: resolvedUserData?.avatarUrl
+                || resolvedUserData?.profileImage
+                || resolvedUserData?.avatar
+                || resolvedUserData?.photo
+                || null,
             mediaUrl,
             thumbnailUrl,
-            aiScore: decision.aiScore || null,
-            aiRank: decision.aiRank || null,
-            overrideReason: decision.overrideReason || null,
+            aiScore,
+            aiRank,
+            overrideReason,
         });
     }
 
@@ -259,7 +322,6 @@ router.get('/:contestId/details', authMiddleware, async (req, res) => {
     try {
         const { contestId } = req.params;
         const userId = req.user?.id || null;
-        console.log('Contest details request:', { contestId, userId: userId || 'anonymous' });
 
         if (!contestId || !mongoose.Types.ObjectId.isValid(contestId)) {
             return res.status(400).json({ success: false, message: 'Invalid contest ID' });
@@ -307,8 +369,8 @@ router.get('/:contestId/details', authMiddleware, async (req, res) => {
                     id: entry._id.toString(),
                     status: entry.status,
                     submittedAt: entry.submittedAt,
-                    photos: entry.photos || [],
-                    videos: entry.videos || [],
+                    photos: (entry.photos || []).map(id => id.toString()),
+                    videos: (entry.videos || []).map(id => id.toString()),
                 };
 
                 const allMediaIds = [...(entry.photos || []), ...(entry.videos || [])].filter(Boolean);
@@ -330,32 +392,34 @@ router.get('/:contestId/details', authMiddleware, async (req, res) => {
                 }
             }
 
-            const submissions = await Submission.find({
-                userId: new mongoose.Types.ObjectId(userId),
-                contestId: new mongoose.Types.ObjectId(contestId)
-            }).lean();
+            if (userSubmissions.length === 0) {
+                const submissions = await Submission.find({
+                    userId: new mongoose.Types.ObjectId(userId),
+                    contestId: new mongoose.Types.ObjectId(contestId)
+                }).lean();
 
-            if (submissions.length > 0 && userSubmissions.length === 0) {
-                const fileIds = submissions.map(s => s.fileId).filter(Boolean);
-                if (fileIds.length > 0) {
-                    const fileDocs = await FileMeta.find({ _id: { $in: fileIds } }).lean();
-                    userSubmissions = fileDocs
-                        .map(p => formatHighlightPhoto(p, contest.endDate, {
-                            isCurated: false,
-                            userName: req.user?.name || req.user?.username || 'You'
-                        }))
-                        .filter(Boolean);
-                }
+                if (submissions.length > 0) {
+                    const fileIds = submissions.map(s => s.fileId).filter(Boolean);
+                    if (fileIds.length > 0) {
+                        const fileDocs = await FileMeta.find({ _id: { $in: fileIds } }).lean();
+                        userSubmissions = fileDocs
+                            .map(p => formatHighlightPhoto(p, contest.endDate, {
+                                isCurated: false,
+                                userName: req.user?.name || req.user?.username || 'You'
+                            }))
+                            .filter(Boolean);
+                    }
 
-                if (!contestEntry) {
-                    const firstSub = submissions[0];
-                    contestEntry = {
-                        id: firstSub._id.toString(),
-                        status: firstSub.status || 'submitted',
-                        submittedAt: firstSub.submittedAt || firstSub.createdAt,
-                        photos: submissions.map(s => s.fileId).filter(Boolean),
-                        videos: [],
-                    };
+                    if (!contestEntry) {
+                        const firstSub = submissions[0];
+                        contestEntry = {
+                            id: firstSub._id.toString(),
+                            status: firstSub.status || 'submitted',
+                            submittedAt: firstSub.submittedAt || firstSub.createdAt,
+                            photos: submissions.map(s => s.fileId?.toString()).filter(Boolean),
+                            videos: [],
+                        };
+                    }
                 }
             }
 
