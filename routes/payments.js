@@ -88,10 +88,16 @@ router.post('/create-order', authMiddleware, async (req, res) => {
                     $set: { status: 'cancelled', updatedAt: new Date() }
                 });
             } else {
-                return res.status(400).json({
-                    message: 'You already have a pending payment. Please wait or retry.',
-                    existingPaymentId: existingPayment.paymentId,
-                    status: existingPayment.status
+                // RESUME FLOW: Reuse the existing pending payment order details
+                console.log(`Resuming existing pending payment order ${existingPayment.orderId} for user ${userId}`);
+                return res.json({
+                    orderId: existingPayment.orderId,
+                    paymentId: existingPayment.paymentId,
+                    amount: existingPayment.amount,
+                    currency: existingPayment.currency,
+                    key: process.env.RAZORPAY_KEY_ID,
+                    contestId: existingPayment.contestId.toString(),
+                    countryCode: existingPayment.metadata?.countryCode || 'IN'
                 });
             }
 
