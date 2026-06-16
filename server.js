@@ -106,6 +106,7 @@ app.use('/api/follow', require('./routes/follow'));
 app.use('/api/favorites', require('./routes/favorites'));
 app.use('/api/contest-favorites', require('./routes/contestFavorites'));
 app.use('/api/gimbi', require('./routes/gimbi'));
+app.use('/api/notifications', require('./routes/notifications'));
 
 // ============================================
 // ROUTES - MEDIA EVALUATION (NEW)
@@ -236,6 +237,14 @@ mongoose
     console.log(' MongoDB connected successfully');
     console.log(` Database: ${mongoose.connection.name}`);
     runAutoMigrations().catch(console.error);
+
+    // Initialize FCM background jobs
+    try {
+      const { startAllCleanupJobs } = require('./jobs/tokenCleanupJob');
+      startAllCleanupJobs();
+    } catch (err) {
+      console.error('Failed to start FCM background jobs:', err);
+    }
   })
   .catch((err) => {
     console.error(' MongoDB connection FAILED:', err.message);

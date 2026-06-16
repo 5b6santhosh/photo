@@ -69,6 +69,60 @@ router.post('/toggle', authMiddleware, async (req, res) => {
         // Read the authoritative count AFTER the transaction
         const meta = await FileMeta.findById(fileObjectId).lean();
 
+        // Trigger FCM notification for milestones: 50, 500, 1000, 1000000 likes
+        if (liked && meta && meta.createdBy) {
+            const likesCount = meta.likesCount ?? 0;
+            const milestones = [50, 500, 1000, 1000000];
+            for (const milestone of milestones) {
+                if (likesCount >= milestone) {
+                    const updated = await FileMeta.findOneAndUpdate(
+                        {
+                            _id: fileObjectId,
+                            likesCount: { $gte: milestone },
+                            reachedMilestones: { $ne: milestone }
+                        },
+                        {
+                            $addToSet: { reachedMilestones: milestone }
+                        },
+                        { new: true }
+                    );
+
+                    if (updated) {
+                        const fcmService = require('../services/fcmService');
+                        const Notification = require('../models/Notification');
+                        const notificationPayload = {
+                            title: '🎉 Milestone Reached!',
+                            body: `Your photo "${meta.title || meta.originalName || 'Photo'}" has reached ${milestone} likes!`,
+                            data: {
+                                type: 'like_milestone',
+                                fileId: fileId,
+                                likesCount: milestone.toString()
+                            }
+                        };
+
+                        // Persist to Notification tracking first, then send FCM
+                        Notification.create({
+                            recipientId: meta.createdBy,
+                            title: notificationPayload.title,
+                            body: notificationPayload.body,
+                            type: 'like_milestone',
+                            metadata: notificationPayload.data
+                        }).then(doc => {
+                            const payloadWithId = {
+                                ...notificationPayload,
+                                data: {
+                                    ...notificationPayload.data,
+                                    notificationId: doc._id.toString()
+                                }
+                            };
+                            fcmService.sendToUser(doc.recipientId.toString(), payloadWithId)
+                                .catch(err => console.error('Error sending like milestone notification:', err));
+                        }).catch(err => console.error('Error persisting/sending like milestone notification:', err));
+                    }
+                }
+            }
+        }
+
         return res.json({
             liked,
             likesCount: meta?.likesCount ?? 0,

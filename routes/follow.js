@@ -74,6 +74,40 @@ router.post('/toggle', authMiddleware, async (req, res) => {
             .select('followersCount followingCount')
             .lean();
 
+        // Trigger follow notification if now following
+        if (following) {
+            const followerName = req.user?.firstName || 'Someone';
+            const fcmService = require('../services/fcmService');
+            const Notification = require('../models/Notification');
+            const notificationPayload = {
+                title: '👤 New Follower',
+                body: `${followerName} started following you.`,
+                data: {
+                    type: 'new_follow',
+                    followerId: followerId
+                }
+            };
+
+            // Persist to Notification tracking first, then send FCM
+            Notification.create({
+                recipientId: targetId,
+                title: notificationPayload.title,
+                body: notificationPayload.body,
+                type: 'new_follow',
+                metadata: notificationPayload.data
+            }).then(doc => {
+                const payloadWithId = {
+                    ...notificationPayload,
+                    data: {
+                        ...notificationPayload.data,
+                        notificationId: doc._id.toString()
+                    }
+                };
+                fcmService.sendToUser(targetId, payloadWithId)
+                    .catch(err => console.error('Error sending follow notification:', err));
+            }).catch(err => console.error('Error persisting/sending follow notification:', err));
+        }
+
         return res.json({
             following,
             followersCount: targetUser?.followersCount ?? 0,

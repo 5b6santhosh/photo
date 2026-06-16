@@ -54,6 +54,7 @@ const FileMetaSchema = new mongoose.Schema({
   isLiked: { type: Boolean, default: false },
   isFavorite: { type: Boolean, default: false },
   userName: { type: String },
+  reachedMilestones: { type: [Number], default: [] },
 
 }, {
   timestamps: { createdAt: 'uploadedAt', updatedAt: 'updatedAt' }

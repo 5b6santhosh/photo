@@ -104,6 +104,47 @@ router.post(
                 { $set: { rules: rules._id } }
             );
 
+            // Broadcast FCM notification to all active device tokens
+            const DeviceToken = require('../../models/DeviceToken');
+            const fcmService = require('../../services/fcmService');
+            DeviceToken.find({ isActive: true })
+                .select('token userId')
+                .lean()
+                .then(tokens => {
+                    if (tokens && tokens.length > 0) {
+                        const tokenStrings = tokens.map(t => t.token);
+                        fcmService.sendMultiple(tokenStrings, {
+                            title: '🏆 New Event Created',
+                            body: `Join the new contest: "${title}" now!`,
+                            data: {
+                                type: 'new_event',
+                                contestId: contest._id.toString()
+                            }
+                        }).catch(err => console.error('Error sending event broadcast:', err));
+
+                        // Persist to Notification tracking for targeted users
+                        const Notification = require('../../models/Notification');
+                        const notificationDocs = tokens
+                            .filter(t => t.userId)
+                            .map(t => ({
+                                recipientId: t.userId,
+                                title: '🏆 New Event Created',
+                                body: `Join the new contest: "${title}" now!`,
+                                type: 'new_event',
+                                metadata: {
+                                    type: 'new_event',
+                                    contestId: contest._id.toString()
+                                }
+                            }));
+
+                        if (notificationDocs.length > 0) {
+                            Notification.insertMany(notificationDocs)
+                                .catch(err => console.error('Error persisting event broadcast notifications:', err));
+                        }
+                    }
+                })
+                .catch(err => console.error('Error fetching tokens for event broadcast:', err));
+
             res.status(201).json({
                 message: 'Event created successfully',
                 eventId: contest._id,
