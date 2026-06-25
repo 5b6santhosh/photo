@@ -84,6 +84,7 @@ app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 app.use('/api/webhooks/razorpay', require('./routes/razorpayWebhook'));
 
 app.use('/api/auth', require('./routes/auth'));
+app.use('/api/auth', require('./routes/socialAuthRoutes')); // Social auth (Google + Apple) — isolated, non-breaking
 app.use('/api/profile', require('./routes/profile'));
 
 app.use('/api/home', require('./routes/home'));
