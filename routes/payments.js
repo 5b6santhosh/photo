@@ -289,10 +289,13 @@ router.post('/verify', authMiddleware, async (req, res) => {
         .update(body)
         .digest('hex');
 
-    const isValidSignature = crypto.timingSafeEqual(
-        Buffer.from(expectedSignature),
-        Buffer.from(razorpay_signature)
-    );
+    const expectedBuffer = Buffer.from(expectedSignature);
+    const signatureBuffer = Buffer.from(razorpay_signature);
+
+    let isValidSignature = false;
+    if (expectedBuffer.length === signatureBuffer.length) {
+        isValidSignature = crypto.timingSafeEqual(expectedBuffer, signatureBuffer);
+    }
 
     if (!isValidSignature) {
         console.warn(`Invalid signature for payment ${razorpay_payment_id}`);
