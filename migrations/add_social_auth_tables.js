@@ -64,23 +64,23 @@ async function runMigration() {
   // Compound unique index — prevents the same social account being linked twice
   await socialAccountsCollection.createIndex(
     { provider: 1, provider_user_id: 1 },
-    { unique: true, background: true, name: 'unique_provider_account' }
+    { unique: true, background: true }
   );
-  console.log('   ✓ Index: unique_provider_account (provider + provider_user_id)');
+  console.log('   ✓ Index: provider + provider_user_id (unique)');
 
   // Index for efficient lookup of all social accounts linked to a user
   await socialAccountsCollection.createIndex(
     { user_id: 1, provider: 1 },
-    { background: true, name: 'user_provider_lookup' }
+    { background: true }
   );
-  console.log('   ✓ Index: user_provider_lookup (user_id + provider)');
+  console.log('   ✓ Index: user_id + provider');
 
   // Sparse index for email lookups (null values are not indexed)
   await socialAccountsCollection.createIndex(
     { email: 1 },
-    { background: true, sparse: true, name: 'social_email_lookup' }
+    { background: true, sparse: true }
   );
-  console.log('   ✓ Index: social_email_lookup (email, sparse)\n');
+  console.log('   ✓ Index: email (sparse)\n');
 
   console.log('🎉  Migration completed successfully!\n');
   console.log('─────────────────────────────────────────────────────────');
