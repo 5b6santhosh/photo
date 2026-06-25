@@ -10,7 +10,19 @@ const UserSchema = new mongoose.Schema({
     type: String, required: true, unique: true, lowercase: true,
     trim: true
   },
-  password: { type: String, required: true },
+  //  password: { type: String, required: true },    //This is without social accounts
+  // ---------------for social accounts--------------
+  password: { type: String, required: false, default: null },
+  auth_provider: {
+    type: String,
+    enum: ['local', 'google', 'apple'],
+    default: 'local'
+  },
+  is_email_verified: {
+    type: Boolean,
+    default: false
+  },
+  // -----------------------------------------------------
   login_date: {
     type: Date,
     default: null
@@ -66,7 +78,7 @@ const UserSchema = new mongoose.Schema({
     type: String,
     enum: ['newCurator', 'bronze', 'silver', 'gold', 'master'],
     default: 'newCurator'
-  }, 
+  },
   dateOfBirth: {
     type: Date,
     default: null
