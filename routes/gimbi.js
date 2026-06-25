@@ -6,8 +6,12 @@
 // ─────────────────────────────────────────────
 
 const express = require('express');
+const multer = require('multer');
 const router = express.Router();
 const gimbiService = require('../services/gimbi.service');
+const { authMiddleware } = require('../middleware/auth');
+
+const upload = multer({ dest: 'uploads/' });
 
 // GET /api/gimbi/status
 router.get('/status', (_req, res) => {
@@ -19,13 +23,33 @@ router.get('/status', (_req, res) => {
   }
 });
 
-// POST /api/gimbi/chat
-router.post('/chat', async (req, res) => {
+// GET /api/gimbi/history
+router.get('/history', authMiddleware, async (req, res) => {
   try {
-    if (!req.body?.message?.trim()) {
+    const { sessionId } = req.query;
+    const userId = req.user?.id;
+    const historyData = await gimbiService.getSessionHistory(sessionId, userId ? String(userId) : null);
+    res.json(historyData);
+  } catch (err) {
+    console.error('/history error', err);
+    res.status(500).json({ error: 'Failed to retrieve chat history.' });
+  }
+});
+
+// POST /api/gimbi/chat
+router.post('/chat', upload.single('image'), async (req, res) => {
+  try {
+    const { userId, message, sessionId, userLevel } = req.body;
+    if (!message?.trim()) {
       return res.status(400).json({ error: 'message is required' });
     }
-    const result = await gimbiService.chat(req.body);
+    const result = await gimbiService.chat({
+      userId,
+      message,
+      sessionId,
+      imageFile: req.file,
+      userLevel
+    });
     res.json(result);
   } catch (err) {
     console.error('/chat error', err);

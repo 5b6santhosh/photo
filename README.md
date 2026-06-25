@@ -20,3 +20,18 @@ const USE_CLOUDINARY = process.env.STORAGE_PROVIDER !== 's3';
 Then set:
 STORAGE_PROVIDER=s3
 ----------------------------------------------------------
+
+
+# Development Environment Configuration
+NODE_ENV=development
+PORT=6000
+MONGO_URI=mongodb+srv://photoCurator:24101997@photocurator.7wecrld.mongodb.net/test?appName=PhotoCurator
+BASE_URL=http://localhost:6000
+ALLOWED_ORIGINS=http://localhost:6000,http://localhost:5173
+
+
+# Production Environment Configuration
+NODE_ENV=production
+MONGO_URI=mongodb+srv://photoCurator:24101997@photocurator.7wecrld.mongodb.net/?appName=PhotoCurator
+BASE_URL=https://photo-production-4173.up.railway.app
+ALLOWED_ORIGINS=https://photo-production-4173.up.railway.app

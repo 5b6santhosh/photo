@@ -1,5 +1,9 @@
 'use strict';
 
+const fs = require('fs');
+const ChatSession = require('../models/ChatSession');
+const { uploadToProvider } = require('./storageService');
+
 // ─────────────────────────────────────────────
 //  gimbi.service.js  (CommonJS — your project style)
 //  v3.2.0 — Gemini + Groq (free tiers), streak, validation, full replies
@@ -205,7 +209,22 @@ function parseJsonReply(raw) {
 }
 
 // ── Groq reply (llama-3.1-8b-instant — free) ─
-async function groqReply(message, userLevel) {
+async function groqReply(history, message, userLevel) {
+  const messages = [
+    { role: 'system', content: systemPrompt(userLevel) }
+  ];
+
+  if (history && history.length > 0) {
+    for (const msg of history) {
+      messages.push({
+        role: msg.role === 'model' ? 'assistant' : 'user',
+        content: msg.text
+      });
+    }
+  }
+
+  messages.push({ role: 'user', content: message });
+
   const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
     method: 'POST',
     headers: {
@@ -214,10 +233,7 @@ async function groqReply(message, userLevel) {
     },
     body: JSON.stringify({
       model: 'llama-3.1-8b-instant',
-      messages: [
-        { role: 'system', content: systemPrompt(userLevel) },
-        { role: 'user', content: message },
-      ],
+      messages: messages,
       max_tokens: 160,
       temperature: 0.7,
     }),
@@ -233,7 +249,7 @@ async function groqReply(message, userLevel) {
 }
 
 // ── Gemini reply (gemini-1.5-flash — free) ───
-async function geminiReply(message, userLevel) {
+async function geminiReply(contents, userLevel) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${process.env.GEMINI_API_KEY_CHAT}`;
 
   const response = await fetch(url, {
@@ -243,9 +259,7 @@ async function geminiReply(message, userLevel) {
       system_instruction: {
         parts: [{ text: systemPrompt(userLevel) }],
       },
-      contents: [
-        { role: 'user', parts: [{ text: message }] },
-      ],
+      contents: contents,
       generationConfig: {
         maxOutputTokens: 160,
         temperature: 0.7,
@@ -266,10 +280,12 @@ async function geminiReply(message, userLevel) {
 
 // ── AI reply with fallback chain ─────────────
 //  Priority: Groq → Gemini → rule-based
-async function aiReply(message, userLevel) {
-  if (process.env.GROQ_API_KEY) {
+async function aiReply({ message, userLevel, history, currentImageBase64, currentImageMimeType }) {
+  const hasImage = !!(currentImageBase64 && currentImageMimeType);
+
+  if (!hasImage && process.env.GROQ_API_KEY) {
     try {
-      return await groqReply(message, userLevel);
+      return await groqReply(history, message, userLevel);
     } catch (err) {
       console.warn('[Gimbi] Groq failed, trying Gemini:', err.message);
     }
@@ -277,7 +293,33 @@ async function aiReply(message, userLevel) {
 
   if (process.env.GEMINI_API_KEY_CHAT) {
     try {
-      return await geminiReply(message, userLevel);
+      const contents = [];
+      if (history && history.length > 0) {
+        for (const msg of history) {
+          contents.push({
+            role: msg.role === 'model' ? 'model' : 'user',
+            parts: [{ text: msg.text }]
+          });
+        }
+      }
+
+      const currentParts = [];
+      if (hasImage) {
+        currentParts.push({
+          inlineData: {
+            mimeType: currentImageMimeType,
+            data: currentImageBase64
+          }
+        });
+      }
+      currentParts.push({ text: message });
+
+      contents.push({
+        role: 'user',
+        parts: currentParts
+      });
+
+      return await geminiReply(contents, userLevel);
     } catch (err) {
       console.warn('[Gimbi] Gemini failed, using rule-based fallback:', err.message);
     }
@@ -303,7 +345,7 @@ exports.getStatus = () => ({
   message: "Hey! I'm Gimbi — let's create something amazing! 📷",
 });
 
-exports.chat = async ({ userId, message, userLevel = 'new_user' }) => {
+exports.chat = async ({ userId, message, sessionId, imageFile, userLevel = 'new_user' }) => {
   if (!message?.trim()) throw new Error('message required');
 
   if (userId) {
@@ -324,9 +366,83 @@ exports.chat = async ({ userId, message, userLevel = 'new_user' }) => {
     store.set(userId, u);
   }
 
+  let currentImageBase64 = null;
+  let currentImageMimeType = null;
+  let uploadedImageUrl = null;
+
+  if (imageFile) {
+    try {
+      currentImageMimeType = imageFile.mimetype;
+      const fileData = await fs.promises.readFile(imageFile.path);
+      currentImageBase64 = fileData.toString('base64');
+
+      const uploadResult = await uploadToProvider(imageFile);
+      uploadedImageUrl = uploadResult.url;
+    } catch (uploadErr) {
+      console.error('[Gimbi] Image upload/processing failed:', uploadErr.message);
+      if (imageFile.path && fs.existsSync(imageFile.path)) {
+        await fs.promises.unlink(imageFile.path).catch(() => {});
+      }
+    }
+  }
+
+  let historyPayload = [];
+  if (sessionId) {
+    try {
+      const session = await ChatSession.findOne({ sessionId });
+      if (session && session.messages) {
+        historyPayload = session.messages;
+      }
+    } catch (dbErr) {
+      console.error('[Gimbi] Database session lookup failed:', dbErr.message);
+    }
+  } else if (userId) {
+    const u = getUser(userId);
+    historyPayload = u.history.map(h => ({
+      role: h.role === 'gimbi' ? 'model' : 'user',
+      text: h.text
+    }));
+  }
+
   const reply = hasAiProvider()
-    ? await aiReply(message, userLevel)
+    ? await aiReply({
+        message,
+        userLevel,
+        history: historyPayload,
+        currentImageBase64,
+        currentImageMimeType
+      })
     : ruleReply(message, userLevel);
+
+  if (sessionId) {
+    try {
+      const newMessages = [
+        {
+          role: 'user',
+          text: message,
+          imageUrl: uploadedImageUrl || null,
+          createdAt: new Date()
+        },
+        {
+          role: 'model',
+          text: reply.message,
+          imageUrl: null,
+          createdAt: new Date()
+        }
+      ];
+
+      await ChatSession.findOneAndUpdate(
+        { sessionId },
+        {
+          $setOnInsert: { userId: userId || 'anonymous' },
+          $push: { messages: { $each: newMessages } }
+        },
+        { upsert: true, new: true }
+      );
+    } catch (saveErr) {
+      console.error('[Gimbi] Database save failed:', saveErr.message);
+    }
+  }
 
   if (userId) {
     const u = getUser(userId);
@@ -335,6 +451,41 @@ exports.chat = async ({ userId, message, userLevel = 'new_user' }) => {
   }
 
   return reply;
+};
+
+exports.getSessionHistory = async (sessionId, userId) => {
+  if (sessionId) {
+    try {
+      const session = await ChatSession.findOne({ sessionId });
+      if (session) {
+        return {
+          sessionId: session.sessionId,
+          messages: session.messages
+        };
+      }
+    } catch (err) {
+      console.error('[Gimbi] Error fetching session history:', err.message);
+    }
+  }
+
+  if (userId) {
+    try {
+      const session = await ChatSession.findOne({ userId }).sort({ updatedAt: -1 });
+      if (session) {
+        return {
+          sessionId: session.sessionId,
+          messages: session.messages
+        };
+      }
+    } catch (err) {
+      console.error('[Gimbi] Error fetching latest session history:', err.message);
+    }
+  }
+
+  return {
+    sessionId: null,
+    messages: []
+  };
 };
 
 exports.analyze = ({ userId, composition, lighting, focus, colors }) => {
