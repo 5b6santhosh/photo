@@ -163,12 +163,13 @@ class NotificationController {
    * Send notification to a specific user
    */
   static sendToUser = asyncHandler(async (req, res) => {
-    const { userId, title, body, data } = sendNotificationSchema.parse(req.body);
+    const { userId, title, body, data, ...rest } = sendNotificationSchema.parse(req.body);
 
     const result = await fcmService.sendToUser(userId, {
       title,
       body,
-      data: data || {}
+      data: data || {},
+      ...rest
     });
 
     if (result.sent === 0) {
@@ -195,12 +196,13 @@ class NotificationController {
    * Send notification to multiple tokens
    */
   static sendBatch = asyncHandler(async (req, res) => {
-    const { tokens, title, body, data } = sendBatchSchema.parse(req.body);
+    const { tokens, title, body, data, ...rest } = sendBatchSchema.parse(req.body);
 
     const result = await fcmService.sendMultiple(tokens, {
       title,
       body,
-      data: data || {}
+      data: data || {},
+      ...rest
     });
 
     logger.info(

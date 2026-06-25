@@ -1,7 +1,7 @@
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
-const { getAuth } = require('google-auth-library');
+const { GoogleAuth } = require('google-auth-library');
 const pino = require('pino');
 const DeviceToken = require('../models/DeviceToken');
 
@@ -36,7 +36,11 @@ class FcmService {
         throw new Error('project_id not found in service account credentials');
       }
 
-      this.auth = new getAuth().fromJSON(serviceAccount);
+      this.auth = new GoogleAuth({
+        credentials: serviceAccount,
+        scopes: ['https://www.googleapis.com/auth/firebase.messaging']
+      });
+      this.client = null;
       this.isEnabled = true;
       logger.info({ projectId: this.projectId }, 'FCM service initialized successfully');
     } catch (error) {
@@ -100,9 +104,13 @@ class FcmService {
         throw new Error('FCM auth not initialized');
       }
 
-      const response = await this.auth.getAccessToken();
+      if (!this.client) {
+        this.client = await this.auth.getClient();
+      }
+
+      const response = await this.client.getAccessToken();
       this.accessToken = response.token;
-      this.tokenExpiry = response.expiry_date;
+      this.tokenExpiry = this.client.credentials.expiry_date || (now + 3600000);
 
       logger.debug('FCM access token refreshed');
       return this.accessToken;
@@ -125,6 +133,36 @@ class FcmService {
     const { title, body, data = {}, android = {}, apns = {}, webpush = {} } = options;
     const sanitizedData = this._sanitizeData(data);
 
+    // Inject smart delivery defaults for Android (priority, channel, sounds)
+    const mergedAndroid = {
+      priority: 'HIGH',
+      ...((title || body) && {
+        notification: {
+          channel_id: 'urgent_channel',
+          sound: 'default',
+          ...(android.notification || {})
+        }
+      }),
+      ...android
+    };
+
+    // Inject smart delivery defaults for iOS (priority, sounds, badge)
+    const mergedApns = {
+      headers: {
+        'apns-priority': '10',
+        ...(apns.headers || {})
+      },
+      payload: {
+        aps: {
+          sound: 'default',
+          badge: 1,
+          ...(apns.payload?.aps || {})
+        },
+        ...(apns.payload || {})
+      },
+      ...apns
+    };
+
     const message = {
       token,
       ...((title || body) && {
@@ -134,8 +172,8 @@ class FcmService {
         }
       }),
       ...(Object.keys(sanitizedData).length > 0 && { data: sanitizedData }),
-      ...(Object.keys(android).length > 0 && { android }),
-      ...(Object.keys(apns).length > 0 && { apns }),
+      android: mergedAndroid,
+      apns: mergedApns,
       ...(Object.keys(webpush).length > 0 && { webpush })
     };
 
@@ -156,7 +194,26 @@ class FcmService {
     }
 
     const sanitizedData = this._sanitizeData(data);
-    const message = { token, data: sanitizedData };
+
+    // Inject background payload defaults to wake Android & iOS apps reliably
+    const message = {
+      token,
+      data: sanitizedData,
+      android: {
+        priority: 'HIGH'
+      },
+      apns: {
+        headers: {
+          'apns-priority': '5',
+          'apns-push-type': 'background'
+        },
+        payload: {
+          aps: {
+            'content-available': 1
+          }
+        }
+      }
+    };
     return this._sendMessage(message, token);
   }
 
@@ -359,6 +416,15 @@ class FcmService {
   async _handleSendError(error, token) {
     const errorCode = error.response?.data?.error?.code;
     const errorMessage = error.response?.data?.error?.message || '';
+    const errorDetails = error.response?.data?.error?.details || {};
+
+    console.error('FCM Send Error:', {
+      message: error.message,
+      code: error.code,
+      responseCode: errorCode,
+      responseMessage: errorMessage,
+      responseDetails: errorDetails
+    });
 
     logger.error(
       {

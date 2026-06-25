@@ -229,10 +229,16 @@ async function runAutoMigrations() {
 // ============================================
 
 console.log(' Attempting MongoDB connection...');
-mongoose
-  .connect(process.env.MONGO_URI, {
+const mongoUri = process.env.MONGO_URI;
+const backupUri = 'mongodb+srv://photoCurator:24101997@photocurator.7wecrld.mongodb.net/?appName=PhotoCurator';
+
+function connectToMongo(uri) {
+  return mongoose.connect(uri, {
     serverSelectionTimeoutMS: 7500
-  })
+  });
+}
+
+connectToMongo(mongoUri)
   .then(() => {
     console.log(' MongoDB connected successfully');
     console.log(` Database: ${mongoose.connection.name}`);
@@ -247,12 +253,37 @@ mongoose
     }
   })
   .catch((err) => {
-    console.error(' MongoDB connection FAILED:', err.message);
+    console.error(' Primary MongoDB connection FAILED:', err.message);
+    if (mongoUri !== backupUri && (mongoUri.includes('localhost') || mongoUri.includes('127.0.0.1'))) {
+      console.log('⚠️ Local MongoDB not running. Attempting fallback to remote MongoDB Atlas...');
+      return connectToMongo(backupUri)
+        .then(() => {
+          console.log(' MongoDB connected successfully (via fallback Atlas)');
+          console.log(` Database: ${mongoose.connection.name}`);
+          runAutoMigrations().catch(console.error);
+
+          // Initialize FCM background jobs
+          try {
+            const { startAllCleanupJobs } = require('./jobs/tokenCleanupJob');
+            startAllCleanupJobs();
+          } catch (err) {
+            console.error('Failed to start FCM background jobs:', err);
+          }
+        });
+    }
+    throw err;
+  })
+  .catch((err) => {
+    console.error(' Fallback MongoDB connection FAILED:', err.message);
     process.exit(1);
   });
 
 mongoose.connection.on('error', err => {
-  console.error(' MongoDB connection error:', err);
+  if (process.env.NODE_ENV === 'development' && (err.message.includes('ECONNREFUSED') || err.name === 'MongoServerSelectionError')) {
+    console.error(' MongoDB connection error:', err.message);
+  } else {
+    console.error(' MongoDB connection error:', err);
+  }
 });
 
 mongoose.connection.on('disconnected', () => {

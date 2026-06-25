@@ -37,7 +37,7 @@ const sendNotificationSchema = z.object({
     .record(z.string())
     .optional()
     .default({})
-});
+}).passthrough();
 
 const sendBatchSchema = z.object({
   tokens: z
@@ -58,7 +58,7 @@ const sendBatchSchema = z.object({
     .record(z.string())
     .optional()
     .default({})
-});
+}).passthrough();
 
 const sendDataOnlySchema = z.object({
   token: z

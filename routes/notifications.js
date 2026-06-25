@@ -39,9 +39,7 @@ router.post(
   '/register-token',
   authMiddleware,
   registerTokenLimiter,
-  (req, res, next) => {
-    NotificationController.registerToken(req, res).catch(next);
-  }
+  NotificationController.registerToken
 );
 
 /**
@@ -52,9 +50,7 @@ router.post(
 router.delete(
   '/unregister-token',
   authMiddleware,
-  (req, res, next) => {
-    NotificationController.unregisterToken(req, res).catch(next);
-  }
+  NotificationController.unregisterToken
 );
 
 /**
@@ -64,9 +60,7 @@ router.delete(
 router.get(
   '/my-tokens',
   authMiddleware,
-  (req, res, next) => {
-    NotificationController.getUserTokens(req, res).catch(next);
-  }
+  NotificationController.getUserTokens
 );
 
 // ============================================================================
@@ -80,9 +74,7 @@ router.get(
 router.get(
   '/',
   authMiddleware,
-  (req, res, next) => {
-    NotificationController.getNotifications(req, res).catch(next);
-  }
+  NotificationController.getNotifications
 );
 
 /**
@@ -92,9 +84,7 @@ router.get(
 router.patch(
   '/:id/read',
   authMiddleware,
-  (req, res, next) => {
-    NotificationController.markAsRead(req, res).catch(next);
-  }
+  NotificationController.markAsRead
 );
 
 // ============================================================================
@@ -110,9 +100,7 @@ router.post(
   '/send-to-user',
   authMiddleware,
   sendNotificationLimiter,
-  (req, res, next) => {
-    NotificationController.sendToUser(req, res).catch(next);
-  }
+  NotificationController.sendToUser
 );
 
 /**
@@ -124,9 +112,7 @@ router.post(
   '/send-batch',
   authMiddleware,
   batchSendLimiter,
-  (req, res, next) => {
-    NotificationController.sendBatch(req, res).catch(next);
-  }
+  NotificationController.sendBatch
 );
 
 /**
@@ -138,9 +124,7 @@ router.post(
   '/send-data-only',
   authMiddleware,
   sendNotificationLimiter,
-  (req, res, next) => {
-    NotificationController.sendDataOnly(req, res).catch(next);
-  }
+  NotificationController.sendDataOnly
 );
 
 /**
@@ -152,9 +136,7 @@ router.post(
   '/send-navigation',
   authMiddleware,
   sendNotificationLimiter,
-  (req, res, next) => {
-    NotificationController.sendWithNavigation(req, res).catch(next);
-  }
+  NotificationController.sendWithNavigation
 );
 
 // ============================================================================
@@ -170,9 +152,7 @@ router.get(
   '/stats',
   authMiddleware,
   requireAdmin,
-  (req, res, next) => {
-    NotificationController.getStats(req, res).catch(next);
-  }
+  NotificationController.getStats
 );
 
 /**
@@ -184,9 +164,7 @@ router.post(
   '/cleanup',
   authMiddleware,
   requireAdmin,
-  (req, res, next) => {
-    NotificationController.cleanupInvalidTokens(req, res).catch(next);
-  }
+  NotificationController.cleanupInvalidTokens
 );
 
 // ============================================================================
