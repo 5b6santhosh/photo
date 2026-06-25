@@ -2,7 +2,7 @@
 // PHOTOCURATORE - MERGED APPLICATION
 // ============================================
 
-require('dotenv').config();
+require('./config/loadEnv');
 const express = require('express');
 const mongoose = require('mongoose');
 const redis = require('./services/redis');

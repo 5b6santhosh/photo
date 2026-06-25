@@ -2,7 +2,7 @@
 // APPLICATION CONFIGURATION
 // ============================================
 
-require('dotenv').config();
+require('./loadEnv');
 
 // Validate required environment variables
 const requiredEnvVars = [

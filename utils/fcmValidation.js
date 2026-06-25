@@ -68,8 +68,8 @@ const sendDataOnlySchema = z.object({
     .trim(),
   data: z
     .record(z.string())
-    .min(1, 'Data payload cannot be empty')
-    .max(100, 'Too many data fields')
+    .refine(val => Object.keys(val).length >= 1, 'Data payload cannot be empty')
+    .refine(val => Object.keys(val).length <= 100, 'Too many data fields')
 });
 
 const unregisterTokenSchema = z.object({
@@ -81,7 +81,7 @@ const unregisterTokenSchema = z.object({
 
 const sendDataWithPayloadSchema = z.object({
   token: z.string().min(1).max(1000),
-  data: z.record(z.string()).min(1),
+  data: z.record(z.string()).refine(val => Object.keys(val).length >= 1, 'Data payload cannot be empty'),
   route: z.string().optional(),
   action: z.string().optional(),
   metadata: z.record(z.unknown()).optional()
