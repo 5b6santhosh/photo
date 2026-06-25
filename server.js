@@ -1,5 +1,5 @@
 // ============================================
-// PHOTOCURATORE - MERGED APPLICATION
+// CLICKS CURATOR - MERGED APPLICATION
 // ============================================
 
 require('./config/loadEnv');
@@ -135,7 +135,7 @@ app.get('/', (req, res) => {
 
 app.get('/api', (req, res) => {
   res.json({
-    service: 'Photocuratore API',
+    service: 'Clicks Curator API',
     version: '2.0.0',
     status: 'running',
     features: {
@@ -336,7 +336,7 @@ const PORT = process.env.PORT || CONFIG.port || 5000;
 
 const server = app.listen(PORT, '0.0.0.0', () => {
   console.log('\n' + '='.repeat(60));
-  console.log('🚀 Photocuratore API Server');
+  console.log('🚀 Clicks Curator API Server');
   console.log('='.repeat(60));
   console.log(`📡 Server listening on port ${PORT}`);
   console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);

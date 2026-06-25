@@ -103,9 +103,9 @@ router.post('/signup', async (req, res) => {
 
     // await mailService.sendMail({
     //   to: email,
-    //   subject: "Activate Your Photo Curator Account",
+    //   subject: "Activate Your Clicks Curator Account",
     //   html: `
-    //     <h2>Welcome to Photo Curator 📸</h2>
+    //     <h2>Welcome to Clicks Curator 📸</h2>
     //     <p>Your OTP is:</p>
     //     <h1>${plainOTP}</h1>
     //     <p>This code expires in 5 minutes.</p>
@@ -114,9 +114,9 @@ router.post('/signup', async (req, res) => {
     try {
       await mailService.sendMail({
         to: email,
-        subject: "Activate Your Photo Curator Account",
+        subject: "Activate Your Clicks Curator Account",
         html: `
-      <h2>Welcome to Photo Curator 📸</h2>
+      <h2>Welcome to Clicks Curator 📸</h2>
       <p>Your OTP is:</p>
       <h1>${plainOTP}</h1>
       <p>This code expires in 5 minutes.</p>
@@ -652,7 +652,7 @@ router.post('/forgot-password', async (req, res) => {
     // Send email (uncomment when mail service is configured)
     await mailService.sendMail({
       to: email,
-      subject: "Reset Your Photo Curator Password 🔐",
+      subject: "Reset Your Clicks Curator Password 🔐",
       html: `
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
           <h2 style="color: #333;">Password Reset Request</h2>
